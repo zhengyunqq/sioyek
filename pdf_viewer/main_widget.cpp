@@ -1846,11 +1846,9 @@ void MainWidget::wheelEvent(QWheelEvent* wevent) {
 
     if ((!is_control_pressed) && (!is_shift_pressed)) {
         if (opengl_widget->is_window_point_in_overview({ normal_x, normal_y })) {
-            if (wevent->angleDelta().y() > 0) {
-                scroll_overview(-1);
-            }
-            if (wevent->angleDelta().y() < 0) {
-                scroll_overview(1);
+            if (wevent->angleDelta().y() != 0) {
+                float delta_y = wevent->angleDelta().y() / 120.0f;
+                scroll_overview(-delta_y);
             }
             if (wevent->angleDelta().x() != 0) {
                 float inverse_factor = INVERTED_HORIZONTAL_SCROLLING ? -1.0f : 1.0f;
@@ -2970,7 +2968,8 @@ bool MainWidget::is_visual_mark_mode() {
     return opengl_widget->get_should_draw_vertical_line();
 }
 
-void MainWidget::scroll_overview(int amount) {
+void MainWidget::scroll_overview(float amount) {
+    if (!opengl_widget->get_overview_page().has_value()) return;
     float vertical_move_amount = VERTICAL_MOVE_AMOUNT * TOUCHPAD_SENSITIVITY * SCROLL_VIEW_SENSITIVITY;
 	OverviewState state = opengl_widget->get_overview_page().value();
 	state.absolute_offset_y += 36.0f * vertical_move_amount * amount;

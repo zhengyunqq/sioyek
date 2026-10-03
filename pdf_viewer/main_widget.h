@@ -282,7 +282,7 @@ public:
 
 	bool is_rotated();
 	void on_new_paper_added(const std::wstring& file_path);
-	void scroll_overview(int amount);
+	void scroll_overview(float amount);
 	int get_current_page_number() const;
 	void set_inverse_search_command(const std::wstring& new_command);
 	int get_current_monitor_width(); int get_current_monitor_height();
