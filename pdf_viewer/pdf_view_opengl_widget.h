@@ -222,6 +222,7 @@ public:
 	void mousePressEvent(QMouseEvent* mevent) override;
 	void mouseReleaseEvent(QMouseEvent* mevent) override;
 	void wheelEvent(QWheelEvent* wevent) override;
+	bool event(QEvent* event) override;
 	void register_on_link_edit_listener(std::function<void(const OpenedBookState&)> listener);
 	void set_overview_page(std::optional<OverviewState> overview_page);
 	std::optional<OverviewState> get_overview_page();

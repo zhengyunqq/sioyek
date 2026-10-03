@@ -1,6 +1,7 @@
 #include "pdf_view_opengl_widget.h"
 #include "path.h"
 #include <qcolor.h>
+#include <qevent.h>
 #include <cmath>
 
 extern Path shader_path;
@@ -1251,6 +1252,42 @@ void PdfViewOpenGLWidget::wheelEvent(QWheelEvent* wevent) {
 		update();
 	}
 
+}
+
+bool PdfViewOpenGLWidget::event(QEvent* event) {
+#ifndef QT_NO_GESTURES
+	// macOS trackpad pinch-to-zoom for the helper (portal) window.
+	// The main view's widget is transparent for mouse events, so its gestures go to MainWidget instead.
+	if (is_helper && (document_view != nullptr) && (event->type() == QEvent::NativeGesture)) {
+		QNativeGestureEvent* gevent = static_cast<QNativeGestureEvent*>(event);
+		if (gevent->gestureType() == Qt::ZoomNativeGesture) {
+			float delta = static_cast<float>(gevent->value());
+			if (delta > -0.9f && delta != 0.0f && document_view->get_document() != nullptr) {
+#ifdef SIOYEK_QT6
+				QPointF local_pos = gevent->position();
+#else
+				QPointF local_pos = gevent->localPos();
+#endif
+				WindowPos pos = { static_cast<float>(local_pos.x()), static_cast<float>(local_pos.y()) };
+				if (delta > 0) {
+					document_view->zoom_in_cursor(pos, 1.0f + delta);
+				}
+				else {
+					document_view->zoom_out_cursor(pos, 1.0f / (1.0f + delta));
+				}
+
+				OpenedBookState new_book_state = document_view->get_state().book_state;
+				if (this->on_link_edit) {
+					(this->on_link_edit.value())(new_book_state);
+				}
+				update();
+			}
+			gevent->accept();
+			return true;
+		}
+	}
+#endif
+	return QOpenGLWidget::event(event);
 }
 
 void PdfViewOpenGLWidget::register_on_link_edit_listener(std::function<void(const OpenedBookState&)> listener) {

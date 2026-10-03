@@ -21,6 +21,7 @@
 #endif
 
 #include <qkeyevent.h>
+#include <qevent.h>
 #include <qlabel.h>
 #include <qlineedit.h>
 #include <qlistview.h>
@@ -1749,6 +1750,40 @@ void MainWidget::mousePressEvent(QMouseEvent* mevent) {
         handle_command_types(command_manager->get_command_with_name("next_state"), 0);
         invalidate_render();
     }
+}
+
+bool MainWidget::event(QEvent* event) {
+#ifndef QT_NO_GESTURES
+    // macOS trackpad pinch-to-zoom is delivered as a native gesture rather than a wheel event.
+    if (event->type() == QEvent::NativeGesture) {
+        QNativeGestureEvent* gevent = static_cast<QNativeGestureEvent*>(event);
+        if (gevent->gestureType() == Qt::ZoomNativeGesture) {
+            if (main_document_view_has_document() && !is_rotated()) {
+                // value() is the relative magnification delta for this step (e.g. 0.02 or -0.03)
+                float delta = static_cast<float>(gevent->value());
+                if (delta > -0.9f && delta != 0.0f) {
+#ifdef SIOYEK_QT6
+                    QPointF local_pos = gevent->position();
+#else
+                    QPointF local_pos = gevent->localPos();
+#endif
+                    WindowPos pos = { static_cast<float>(local_pos.x()), static_cast<float>(local_pos.y()) };
+                    if (delta > 0) {
+                        zoom(pos, 1.0f + delta, true);
+                    }
+                    else {
+                        // dividing by 1/(1+delta) keeps zoom-in and zoom-out symmetric
+                        zoom(pos, 1.0f / (1.0f + delta), false);
+                    }
+                    update_scrollbar();
+                }
+            }
+            gevent->accept();
+            return true;
+        }
+    }
+#endif
+    return QWidget::event(event);
 }
 
 void MainWidget::wheelEvent(QWheelEvent* wevent) {
