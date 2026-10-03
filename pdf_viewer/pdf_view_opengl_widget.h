@@ -148,11 +148,14 @@ private:
 	std::optional<std::function<void(const OpenedBookState&)>> on_link_edit = {};
 	std::optional<OverviewState> overview_page = {};
 
-	float overview_half_width = 0.8f;
-	float overview_half_height = 0.4f;
+	float overview_half_width = 0.75f;
+	float overview_half_height = 0.45f;
 
 	float overview_offset_x = 0.0f;
 	float overview_offset_y = 0.0f;
+
+	float overview_zoom_factor = 1.0f;
+	float overview_pan_x = 0.0f;
 
 	std::optional<fz_rect> selected_rectangle = {};
 
@@ -237,6 +240,10 @@ public:
 
 	void get_overview_offsets(float* offset_x, float* offset_y);
 	void get_overview_size(float* width, float* height);
+	void set_overview_size(float width, float height);
+	void zoom_overview(float factor);
+	void pan_overview_horizontal(float diff);
+	float get_overview_zoom_factor() const;
 
 	float get_overview_side_pos(int index);
 	void set_overview_side_pos(int index, fz_rect original_rect, fvec2 diff);

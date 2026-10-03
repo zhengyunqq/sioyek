@@ -1758,16 +1758,28 @@ bool MainWidget::event(QEvent* event) {
     if (event->type() == QEvent::NativeGesture) {
         QNativeGestureEvent* gevent = static_cast<QNativeGestureEvent*>(event);
         if (gevent->gestureType() == Qt::ZoomNativeGesture) {
-            if (main_document_view_has_document() && !is_rotated()) {
-                // value() is the relative magnification delta for this step (e.g. 0.02 or -0.03)
-                float delta = static_cast<float>(gevent->value());
-                if (delta > -0.9f && delta != 0.0f) {
+            float delta = static_cast<float>(gevent->value());
+            if (delta > -0.9f && delta != 0.0f) {
 #ifdef SIOYEK_QT6
-                    QPointF local_pos = gevent->position();
+                QPointF local_pos = gevent->position();
 #else
-                    QPointF local_pos = gevent->localPos();
+                QPointF local_pos = gevent->localPos();
 #endif
-                    WindowPos pos = { static_cast<float>(local_pos.x()), static_cast<float>(local_pos.y()) };
+                WindowPos pos = { static_cast<float>(local_pos.x()), static_cast<float>(local_pos.y()) };
+
+                if (main_document_view_has_document()) {
+                    auto [normal_x, normal_y] = main_document_view->window_to_normalized_window_pos(pos);
+                    if (opengl_widget && opengl_widget->get_overview_page().has_value() &&
+                        opengl_widget->is_window_point_in_overview({ normal_x, normal_y })) {
+                        float factor = (delta > 0) ? (1.0f + delta) : (1.0f / (1.0f - delta));
+                        opengl_widget->zoom_overview(factor);
+                        validate_render();
+                        gevent->accept();
+                        return true;
+                    }
+                }
+
+                if (main_document_view_has_document() && !is_rotated()) {
                     if (delta > 0) {
                         zoom(pos, 1.0f + delta, true);
                     }
@@ -1840,7 +1852,12 @@ void MainWidget::wheelEvent(QWheelEvent* wevent) {
             if (wevent->angleDelta().y() < 0) {
                 scroll_overview(1);
             }
+            if (wevent->angleDelta().x() != 0) {
+                float inverse_factor = INVERTED_HORIZONTAL_SCROLLING ? -1.0f : 1.0f;
+                opengl_widget->pan_overview_horizontal((wevent->angleDelta().x() / 120.0f) * 0.05f * inverse_factor);
+            }
             validate_render();
+            return;
         }
         else {
 
@@ -1881,6 +1898,18 @@ void MainWidget::wheelEvent(QWheelEvent* wevent) {
     }
 
     if (is_control_pressed) {
+        if (opengl_widget && opengl_widget->get_overview_page().has_value() &&
+            opengl_widget->is_window_point_in_overview({ normal_x, normal_y })) {
+            float zoom_factor = 1.0f + num_repeats_f * (ZOOM_INC_FACTOR - 1.0f);
+            if (wevent->angleDelta().y() > 0) {
+                opengl_widget->zoom_overview(zoom_factor);
+            }
+            else {
+                opengl_widget->zoom_overview(1.0f / zoom_factor);
+            }
+            validate_render();
+            return;
+        }
         float zoom_factor = 1.0f + num_repeats_f * (ZOOM_INC_FACTOR - 1.0f);
         zoom(mouse_window_pos, zoom_factor, wevent->angleDelta().y() > 0);
         return;
