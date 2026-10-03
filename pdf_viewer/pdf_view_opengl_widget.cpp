@@ -507,6 +507,30 @@ void PdfViewOpenGLWidget::goto_search_result(int offset, bool overview) {
 }
 
 
+void PdfViewOpenGLWidget::get_overview_crop_params(Document* doc, int page, float* smart_crop_factor, float* content_center_ratio) {
+	*smart_crop_factor = 1.0f;
+	*content_center_ratio = 0.5f;
+
+	if (doc == nullptr || page < 0 || page >= doc->num_pages()) return;
+
+	float left_ratio = 0.0f;
+	float right_ratio = 1.0f;
+	int normal_page_width = static_cast<int>(doc->get_page_width(page));
+	doc->get_page_size_smart(true, page, &left_ratio, &right_ratio, &normal_page_width);
+
+	if (right_ratio > left_ratio && (right_ratio - left_ratio) > 0.2f && (right_ratio - left_ratio) < 0.98f) {
+		float content_width_ratio = right_ratio - left_ratio;
+		float padding = 0.05f * content_width_ratio;
+		float effective_left = std::max(0.0f, left_ratio - padding);
+		float effective_right = std::min(1.0f, right_ratio + padding);
+		float effective_width_ratio = effective_right - effective_left;
+		if (effective_width_ratio > 0.1f) {
+			*smart_crop_factor = 1.0f / effective_width_ratio;
+			*content_center_ratio = (effective_left + effective_right) / 2.0f;
+		}
+	}
+}
+
 void PdfViewOpenGLWidget::render_overview(OverviewState overview) {
 	if (!valid_document()) return;
 	Document* target_doc = document_view->get_document();
@@ -521,7 +545,12 @@ void PdfViewOpenGLWidget::render_overview(OverviewState overview) {
 	float view_height = static_cast<int>(document_view->get_view_height() * overview_half_height);
 	float page_width = target_doc->get_page_width(docpos.page);
 	float page_height = target_doc->get_page_height(docpos.page);
-	float zoom_level = (view_width / page_width) * overview_zoom_factor;
+
+	float smart_crop_factor = 1.0f;
+	float content_center_ratio = 0.5f;
+	get_overview_crop_params(target_doc, docpos.page, &smart_crop_factor, &content_center_ratio);
+
+	float zoom_level = (view_width / page_width) * smart_crop_factor * overview_zoom_factor;
 
 	GLuint texture = pdf_renderer->find_rendered_page(target_doc->get_path(),
 		docpos.page,
@@ -546,9 +575,9 @@ void PdfViewOpenGLWidget::render_overview(OverviewState overview) {
 		* zoom_level / document_view->get_view_height();
 
 	float center_x = (window_rect.x0 + window_rect.x1) / 2.0f;
-	float half_page_ndc_width = ((window_rect.x1 - window_rect.x0) / 2.0f) * overview_zoom_factor;
-	float page_min_x = center_x - half_page_ndc_width + overview_pan_x;
-	float page_max_x = center_x + half_page_ndc_width + overview_pan_x;
+	float page_ndc_width = (window_rect.x1 - window_rect.x0) * smart_crop_factor * overview_zoom_factor;
+	float page_min_x = center_x + overview_pan_x - content_center_ratio * page_ndc_width;
+	float page_max_x = page_min_x + page_ndc_width;
 	float page_max_y = (window_rect.y0 + window_rect.y1) / 2 - offset_diff;
 	float page_min_y = (window_rect.y0 + window_rect.y1) / 2 - offset_diff +  2 * page_height * zoom_level / document_view->get_view_height();
 
@@ -1558,12 +1587,17 @@ DocumentPos PdfViewOpenGLWidget::window_pos_to_overview_pos(NormalizedWindowPos 
 	DocumentPos docpos = target->absolute_to_page_pos({ 0, get_overview_page().value().absolute_offset_y });
 	float overview_width = document_view->get_view_width() * overview_half_width;
 	float page_width = target->get_page_width(docpos.page);
-	float zoom_level = (overview_width / page_width) * overview_zoom_factor;
+
+	float smart_crop_factor = 1.0f;
+	float content_center_ratio = 0.5f;
+	get_overview_crop_params(target, docpos.page, &smart_crop_factor, &content_center_ratio);
+
+	float zoom_level = (overview_width / page_width) * smart_crop_factor * overview_zoom_factor;
 
 	fz_rect window_rect = get_overview_rect();
 	float center_x = (window_rect.x0 + window_rect.x1) / 2.0f;
-	float half_page_ndc_width = ((window_rect.x1 - window_rect.x0) / 2.0f) * overview_zoom_factor;
-	float page_min_x = center_x - half_page_ndc_width + overview_pan_x;
+	float page_ndc_width = (window_rect.x1 - window_rect.x0) * smart_crop_factor * overview_zoom_factor;
+	float page_min_x = center_x + overview_pan_x - content_center_ratio * page_ndc_width;
 
 	int page_left_pixel = static_cast<int>((1.0f + page_min_x) / 2.0f * window_width);
 	int overview_mid = ( - overview_offset_y) * window_height / 2 + window_height / 2;
@@ -1731,16 +1765,32 @@ void PdfViewOpenGLWidget::zoom_overview(float factor) {
 		overview_pan_x = 0.0f;
 	}
 	else {
-		float half_page_ndc_width = overview_half_width * overview_zoom_factor;
-		float max_pan = half_page_ndc_width - overview_half_width;
+		Document* target_doc = get_current_overview_document();
+		OverviewState overview = overview_page.value();
+		DocumentPos docpos = target_doc->absolute_to_page_pos({ 0, overview.absolute_offset_y });
+		float smart_crop_factor = 1.0f;
+		float content_center_ratio = 0.5f;
+		get_overview_crop_params(target_doc, docpos.page, &smart_crop_factor, &content_center_ratio);
+
+		float total_zoom = smart_crop_factor * overview_zoom_factor;
+		float half_page_ndc_width = overview_half_width * total_zoom;
+		float max_pan = std::max(0.0f, half_page_ndc_width - overview_half_width);
 		overview_pan_x = std::clamp(overview_pan_x, -max_pan, max_pan);
 	}
 }
 
 void PdfViewOpenGLWidget::pan_overview_horizontal(float diff) {
 	if (!overview_page.has_value()) return;
-	if (overview_zoom_factor > 1.0f) {
-		float half_page_ndc_width = overview_half_width * overview_zoom_factor;
+	Document* target_doc = get_current_overview_document();
+	OverviewState overview = overview_page.value();
+	DocumentPos docpos = target_doc->absolute_to_page_pos({ 0, overview.absolute_offset_y });
+	float smart_crop_factor = 1.0f;
+	float content_center_ratio = 0.5f;
+	get_overview_crop_params(target_doc, docpos.page, &smart_crop_factor, &content_center_ratio);
+
+	float total_zoom = smart_crop_factor * overview_zoom_factor;
+	if (total_zoom > 1.0f) {
+		float half_page_ndc_width = overview_half_width * total_zoom;
 		float max_pan = half_page_ndc_width - overview_half_width;
 		overview_pan_x = std::clamp(overview_pan_x + diff, -max_pan, max_pan);
 	}
@@ -1830,14 +1880,18 @@ NormalizedWindowPos PdfViewOpenGLWidget::document_to_overview_pos(DocumentPos po
 
 		AbsoluteDocumentPos abspos = target_doc->document_to_absolute_pos(pos);
 
-		float overview_zoom_level = (2 * overview_half_width) / target_doc->get_page_width(docpos.page) * overview_zoom_factor;
+		float smart_crop_factor = 1.0f;
+		float content_center_ratio = 0.5f;
+		get_overview_crop_params(target_doc, docpos.page, &smart_crop_factor, &content_center_ratio);
+
+		float overview_zoom_level = (2 * overview_half_width) / target_doc->get_page_width(docpos.page) * smart_crop_factor * overview_zoom_factor;
 
 		float relative_x = abspos.x * overview_zoom_level;
 		float aspect = static_cast<float>(width()) / static_cast<float>(height());
 		float relative_y = (abspos.y - overview.absolute_offset_y) * overview_zoom_level * aspect;
 		float center_x = overview_offset_x;
-		float half_page_ndc_width = overview_half_width * overview_zoom_factor;
-		float left = center_x - half_page_ndc_width + overview_pan_x;
+		float page_ndc_width = (2 * overview_half_width) * smart_crop_factor * overview_zoom_factor;
+		float left = center_x + overview_pan_x - content_center_ratio * page_ndc_width;
 		float top = overview_offset_y;
 		return {left + relative_x, top - relative_y};
 	}

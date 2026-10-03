@@ -148,17 +148,18 @@ private:
 	std::optional<std::function<void(const OpenedBookState&)>> on_link_edit = {};
 	std::optional<OverviewState> overview_page = {};
 
-	float overview_half_width = 0.75f;
-	float overview_half_height = 0.45f;
+	float overview_half_width = 0.38f;
+	float overview_half_height = 0.28f;
 
-	float overview_offset_x = 0.0f;
-	float overview_offset_y = 0.0f;
+	float overview_offset_x = 0.55f;
+	float overview_offset_y = 0.65f;
 
 	float overview_zoom_factor = 1.0f;
 	float overview_pan_x = 0.0f;
 
 	std::optional<fz_rect> selected_rectangle = {};
 
+	void get_overview_crop_params(Document* doc, int page, float* smart_crop_factor, float* content_center_ratio);
 	GLuint LoadShaders(Path vertex_file_path_, Path fragment_file_path_);
 protected: 
 	void initializeGL() override;
