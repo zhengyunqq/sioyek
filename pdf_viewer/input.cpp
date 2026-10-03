@@ -2451,6 +2451,7 @@ InputParseTreeNode parse_token(std::wstring token) {
 				{L"left", Qt::Key::Key_Left},
 				{L"right", Qt::Key::Key_Right},
 				{L"backspace", Qt::Key::Key_Backspace},
+				{L"delete", Qt::Key::Key_Delete},
 				{L"space", Qt::Key::Key_Space},
 				{L"pageup", Qt::Key::Key_PageUp},
 				{L"pagedown", Qt::Key::Key_PageDown},
@@ -2703,8 +2704,11 @@ std::vector<std::unique_ptr<Command>> InputHandler::handle_key(QKeyEvent* key_ev
 
 	int key = 0;
 	if (!USE_LEGACY_KEYBINDS){
-		std::vector<QString> special_texts = {"\b", "\t", " ", "\r", "\n"};
-		if (((key_event->key() >= 'A') && (key_event->key() <= 'Z')) || ((key_event->text().size() > 0) &&
+		std::vector<QString> special_texts = {"\b", "\t", " ", "\r", "\n", "\x7f"};
+		if (key_event->key() == Qt::Key::Key_Backspace || key_event->key() == Qt::Key::Key_Delete) {
+			key = Qt::Key::Key_Backspace;
+		}
+		else if (((key_event->key() >= 'A') && (key_event->key() <= 'Z')) || ((key_event->text().size() > 0) &&
 			(std::find(special_texts.begin(), special_texts.end(), key_event->text()) == special_texts.end()))) {
 			if (!control_pressed && !alt_pressed) {
 				// shift is already handled in the returned text

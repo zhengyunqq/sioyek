@@ -87,6 +87,7 @@ extern bool SHOULD_WARN_ABOUT_USER_KEY_OVERRIDE;
 extern bool SINGLE_CLICK_SELECTS_WORDS;
 extern std::wstring SHIFT_CLICK_COMMAND;
 extern std::wstring CONTROL_CLICK_COMMAND;
+extern std::wstring CONTROL_SHIFT_CLICK_COMMAND;
 extern std::wstring SHIFT_RIGHT_CLICK_COMMAND;
 extern std::wstring CONTROL_RIGHT_CLICK_COMMAND;
 extern std::wstring ALT_CLICK_COMMAND;
@@ -423,6 +424,8 @@ ConfigManager::ConfigManager(const Path& default_path, const Path& auto_path ,co
 	configs.push_back({ L"single_click_selects_words", &SINGLE_CLICK_SELECTS_WORDS, bool_serializer, bool_deserializer, bool_validator });
 	configs.push_back({ L"shift_click_command", &SHIFT_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
 	configs.push_back({ L"control_click_command", &CONTROL_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
+	configs.push_back({ L"control_shift_click_command", &CONTROL_SHIFT_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
+	configs.push_back({ L"command_shift_click_command", &CONTROL_SHIFT_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
 	configs.push_back({ L"shift_right_click_command", &SHIFT_RIGHT_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
 	configs.push_back({ L"control_right_click_command", &CONTROL_RIGHT_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
 	configs.push_back({ L"use_legacy_keybinds", &USE_LEGACY_KEYBINDS, bool_serializer, bool_deserializer, bool_validator });

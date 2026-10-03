@@ -1,4 +1,4 @@
-﻿
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -99,6 +99,7 @@ extern bool SHOW_DOC_PATH;
 extern bool SINGLE_CLICK_SELECTS_WORDS;
 extern std::wstring SHIFT_CLICK_COMMAND;
 extern std::wstring CONTROL_CLICK_COMMAND;
+extern std::wstring CONTROL_SHIFT_CLICK_COMMAND;
 extern std::wstring SHIFT_RIGHT_CLICK_COMMAND;
 extern std::wstring CONTROL_RIGHT_CLICK_COMMAND;
 extern std::wstring ALT_CLICK_COMMAND;
@@ -1643,7 +1644,8 @@ bool MainWidget::find_location_of_text_under_pointer(WindowPos pointer_pos, int*
 void MainWidget::mouseReleaseEvent(QMouseEvent* mevent) {
 
     bool is_shift_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::ShiftModifier);
-    bool is_control_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::ControlModifier);
+    bool is_control_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::ControlModifier) ||
+                              QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::MetaModifier);
     bool is_alt_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::AltModifier);
 
 	if (is_rotated()) {
@@ -1651,7 +1653,11 @@ void MainWidget::mouseReleaseEvent(QMouseEvent* mevent) {
 	}
 
     if (mevent->button() == Qt::MouseButton::LeftButton) {
-        if (is_shift_pressed) {
+        if (is_shift_pressed && is_control_pressed) {
+			auto commands = command_manager->create_macro_command("", CONTROL_SHIFT_CLICK_COMMAND);
+			commands->run(this);
+        }
+        else if (is_shift_pressed) {
 			auto commands = command_manager->create_macro_command("", SHIFT_CLICK_COMMAND);
 			commands->run(this);
         }
@@ -1722,7 +1728,8 @@ void MainWidget::mouseDoubleClickEvent(QMouseEvent* mevent) {
 
 void MainWidget::mousePressEvent(QMouseEvent* mevent) {
     bool is_shift_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::ShiftModifier);
-    bool is_control_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::ControlModifier);
+    bool is_control_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::ControlModifier) ||
+                              QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::MetaModifier);
     bool is_alt_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::AltModifier);
 
     if (mevent->button() == Qt::MouseButton::LeftButton) {
