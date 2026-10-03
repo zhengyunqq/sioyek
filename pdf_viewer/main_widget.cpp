@@ -1379,6 +1379,10 @@ void MainWidget::handle_left_click(WindowPos click_pos, bool down, bool is_shift
 
     if (down == true) {
 
+        if (is_control_pressed) {
+            return;
+        }
+
         PdfViewOpenGLWidget::OverviewSide border_index = static_cast<PdfViewOpenGLWidget::OverviewSide>(-1);
         if (opengl_widget->is_window_point_in_overview_border(normal_x, normal_y, &border_index)) {
             PdfViewOpenGLWidget::OverviewResizeData resize_data;
@@ -1663,6 +1667,16 @@ void MainWidget::mouseReleaseEvent(QMouseEvent* mevent) {
 			commands->run(this);
         }
         else if (is_control_pressed) {
+            overview_move_data = {};
+            overview_resize_data = {};
+            if (opengl_widget && opengl_widget->get_overview_page().has_value() &&
+                main_document_view_has_document()) {
+                auto [normal_x, normal_y] = main_document_view->window_to_normalized_window_pos({ static_cast<float>(mevent->pos().x()), static_cast<float>(mevent->pos().y()) });
+                if (opengl_widget->is_window_point_in_overview({ normal_x, normal_y })) {
+                    goto_overview();
+                    return;
+                }
+            }
 			auto commands = command_manager->create_macro_command("", CONTROL_CLICK_COMMAND);
 			commands->run(this);
         }
@@ -1709,7 +1723,15 @@ void MainWidget::mouseReleaseEvent(QMouseEvent* mevent) {
             invalidate_render();
         }
         else {
-          smart_jump_under_pos({ mevent->pos().x(), mevent->pos().y() });
+            if (opengl_widget && opengl_widget->get_overview_page().has_value() &&
+                main_document_view_has_document()) {
+                auto [normal_x, normal_y] = main_document_view->window_to_normalized_window_pos({ static_cast<float>(mevent->pos().x()), static_cast<float>(mevent->pos().y()) });
+                if (opengl_widget->is_window_point_in_overview({ normal_x, normal_y })) {
+                    goto_overview();
+                    return;
+                }
+            }
+            smart_jump_under_pos({ mevent->pos().x(), mevent->pos().y() });
         }
     }
 
@@ -3332,7 +3354,7 @@ void MainWidget::goto_overview() {
 			}
         }
 		opengl_widget->set_overview_page({});
-
+		invalidate_render();
     }
 }
 

@@ -424,6 +424,7 @@ ConfigManager::ConfigManager(const Path& default_path, const Path& auto_path ,co
 	configs.push_back({ L"single_click_selects_words", &SINGLE_CLICK_SELECTS_WORDS, bool_serializer, bool_deserializer, bool_validator });
 	configs.push_back({ L"shift_click_command", &SHIFT_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
 	configs.push_back({ L"control_click_command", &CONTROL_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
+	configs.push_back({ L"command_click_command", &CONTROL_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
 	configs.push_back({ L"control_shift_click_command", &CONTROL_SHIFT_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
 	configs.push_back({ L"command_shift_click_command", &CONTROL_SHIFT_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
 	configs.push_back({ L"shift_right_click_command", &SHIFT_RIGHT_CLICK_COMMAND, string_serializer, string_deserializer, nullptr });
