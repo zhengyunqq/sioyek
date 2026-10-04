@@ -3185,6 +3185,7 @@ void MainWidget::synctex_under_pos(WindowPos position) {
 
 void MainWidget::set_status_message(std::wstring new_status_string) {
     custom_status_message = new_status_string;
+    validate_ui();
 }
 
 void MainWidget::remove_self_from_windows() {
