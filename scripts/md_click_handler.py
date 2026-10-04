@@ -139,10 +139,12 @@ def main():
 
     if reader_action == "edit":
         # Transition seamlessly to Markdown Editor Dialog
+        init_w = target_annot.rect.width if (existing_mode == 'card' and target_annot.rect.width > 100) else 260.0
         editor = MarkdownEditorDialog(
             initial_text=md_text,
+            is_edit=True,
+            initial_width=init_w,
             page_num=page_num + 1,
-            rect_coords=(target_annot.rect.x0, target_annot.rect.y0, target_annot.rect.x1, target_annot.rect.y1),
             initial_mode=existing_mode
         )
         editor.exec_()
