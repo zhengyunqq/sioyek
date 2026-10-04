@@ -22,7 +22,7 @@ def parse_rect(s):
 def is_deletable_annot(annot):
     if annot.type[1] in ('FreeText', 'Text'):
         return True
-    if annot.type[1] == 'Stamp' and (annot.info.get('subject') == 'sioyek_markdown' or annot.info.get('name') == 'ImageStamp'):
+    if annot.type[1] == 'Stamp' and (annot.info.get('subject') in ('sioyek_markdown', 'sioyek_markdown_pill', 'sioyek_markdown_card') or annot.info.get('name') == 'ImageStamp'):
         return True
     return False
 
