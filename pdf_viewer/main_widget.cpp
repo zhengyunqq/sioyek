@@ -1369,13 +1369,18 @@ void MainWidget::handle_left_click(WindowPos click_pos, bool down, bool is_shift
             }
         }
         else {
-            if (rect_select_begin.has_value() && rect_select_end.has_value()) {
+            if (rect_select_begin.has_value()) {
 				rect_select_end = abs_doc_pos;
 				fz_rect selected_rectangle;
 				selected_rectangle.x0 = rect_select_begin.value().x;
 				selected_rectangle.y0 = rect_select_begin.value().y;
 				selected_rectangle.x1 = rect_select_end.value().x;
 				selected_rectangle.y1 = rect_select_end.value().y;
+
+				if (fabs(selected_rectangle.x1 - selected_rectangle.x0) < 10 && fabs(selected_rectangle.y1 - selected_rectangle.y0) < 10) {
+					selected_rectangle.x1 = selected_rectangle.x0 + 150;
+					selected_rectangle.y1 = selected_rectangle.y0 + 30;
+				}
 				opengl_widget->set_selected_rectangle(selected_rectangle);
 
                 // is pending rect command
@@ -1393,7 +1398,7 @@ void MainWidget::handle_left_click(WindowPos click_pos, bool down, bool is_shift
 		return;
     }
     else {
-        if (down == true) {
+        if (down == true && pending_command_instance == nullptr) {
             clear_selected_rect();
         }
     }
@@ -2359,7 +2364,7 @@ void MainWidget::toggle_dark_mode() {
     this->opengl_widget->toggle_dark_mode();
 }
 
-void MainWidget::execute_command(std::wstring command, std::wstring text, bool wait) {
+void MainWidget::execute_command(std::wstring command, std::wstring text, bool wait, std::optional<fz_rect> rect_requirement) {
 
     std::wstring file_path = main_document_view->get_document()->get_path();
     QString qfile_path = QString::fromStdWString(file_path);
@@ -2402,6 +2407,47 @@ void MainWidget::execute_command(std::wstring command, std::wstring text, bool w
         WindowPos mouse_pos = { mouse_pos_.x(), mouse_pos_.y() };
         DocumentPos mouse_pos_document = main_document_view->window_to_document_pos(mouse_pos);
 
+        int selected_rect_page = -1;
+        fz_rect selected_rect_rect;
+        bool has_rect = false;
+
+        if (rect_requirement.has_value() && main_document_view_has_document()) {
+            float min_x = std::min(rect_requirement.value().x0, rect_requirement.value().x1);
+            float max_x = std::max(rect_requirement.value().x0, rect_requirement.value().x1);
+            float min_y = std::min(rect_requirement.value().y0, rect_requirement.value().y1);
+            float max_y = std::max(rect_requirement.value().y0, rect_requirement.value().y1);
+
+            AbsoluteDocumentPos top_left = { min_x, min_y };
+            AbsoluteDocumentPos bottom_right = { max_x, max_y };
+            DocumentPos top_left_document = main_document_view->get_document()->absolute_to_page_pos(top_left);
+            DocumentPos bottom_right_document = main_document_view->get_document()->absolute_to_page_pos(bottom_right);
+
+            selected_rect_rect.x0 = top_left_document.x;
+            selected_rect_rect.y0 = top_left_document.y;
+            selected_rect_rect.x1 = bottom_right_document.x;
+            selected_rect_rect.y1 = bottom_right_document.y;
+            selected_rect_page = top_left_document.page;
+            has_rect = true;
+        }
+        else if (get_selected_rect_document(selected_rect_page, selected_rect_rect)) {
+            has_rect = true;
+        }
+
+        QString rect_string;
+        if (has_rect) {
+            QString format_string = "%1,%2,%3,%4,%5";
+            rect_string = format_string
+                .arg(QString::number(selected_rect_page))
+                .arg(QString::number(selected_rect_rect.x0))
+                .arg(QString::number(selected_rect_rect.y0))
+                .arg(QString::number(selected_rect_rect.x1))
+                .arg(QString::number(selected_rect_rect.y1));
+        }
+        else if (command.find(L"%{selected_rect}") != std::wstring::npos) {
+            show_error_message(L"No rectangle selected");
+            return;
+        }
+
         for (int i = 0; i < command_parts.size(); i++) {
             // lagacy number macros, now replaced with names ones
             command_parts[i].replace("%1", qfile_path);
@@ -2441,17 +2487,8 @@ void MainWidget::execute_command(std::wstring command, std::wstring text, bool w
             command_parts[i].replace("%{local_database}", QString::fromStdWString(local_database_file_path.get_path()));
             command_parts[i].replace("%{shared_database}", QString::fromStdWString(global_database_file_path.get_path()));
 
-            int selected_rect_page = -1;
-            fz_rect selected_rect_rect;
-            if (get_selected_rect_document(selected_rect_page, selected_rect_rect)) {
-                QString format_string = "%1,%2,%3,%4,%5";
-                QString rect_string = format_string
-                    .arg(QString::number(selected_rect_page))
-                    .arg(QString::number(selected_rect_rect.x0))
-                    .arg(QString::number(selected_rect_rect.y0))
-                    .arg(QString::number(selected_rect_rect.x1))
-                    .arg(QString::number(selected_rect_rect.y1));
-				command_parts[i].replace("%{selected_rect}", rect_string);
+            if (has_rect) {
+                command_parts[i].replace("%{selected_rect}", rect_string);
             }
 
 
@@ -2471,6 +2508,10 @@ void MainWidget::execute_command(std::wstring command, std::wstring text, bool w
         }
 
         run_command(command_name.toStdWString(), command_args, wait);
+        if (has_rect) {
+            clear_selected_rect();
+            validate_render();
+        }
     }
 
 }

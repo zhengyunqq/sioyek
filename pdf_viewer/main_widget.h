@@ -183,7 +183,7 @@ public:
 	void long_jump_to_destination(DocumentPos pos);
 	void long_jump_to_destination(int page, float offset_y);
 	void long_jump_to_destination(float abs_offset_y);
-	void execute_command(std::wstring command, std::wstring text=L"", bool wait=false);
+	void execute_command(std::wstring command, std::wstring text=L"", bool wait=false, std::optional<fz_rect> rect_requirement = {});
 	//QString get_status_stylesheet();
     void smart_jump_under_pos(WindowPos pos);
     bool overview_under_pos(WindowPos pos);

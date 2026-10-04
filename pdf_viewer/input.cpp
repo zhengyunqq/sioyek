@@ -2143,8 +2143,13 @@ public:
 
 	std::optional<Requirement> next_requirement(MainWidget* widget) {
 		if (command_requires_rect(raw_command) && (!command_rect.has_value())) {
-			Requirement req = { RequirementType::Rect, "Command Rect"};
-			return req;
+			if (widget->get_selected_rect_absolute().has_value()) {
+				command_rect = widget->get_selected_rect_absolute().value();
+			}
+			else {
+				Requirement req = { RequirementType::Rect, "Command Rect"};
+				return req;
+			}
 		}
 		if (command_requires_text(raw_command) && (!command_text.has_value())) {
 			Requirement req = { RequirementType::Text, "Command Text"};
@@ -2162,7 +2167,7 @@ public:
 	}
 
 	void perform(MainWidget* widget) {
-		widget->execute_command(raw_command, command_text.value_or(L""));
+		widget->execute_command(raw_command, command_text.value_or(L""), false, command_rect);
 	}
 
 	std::string get_name() {
