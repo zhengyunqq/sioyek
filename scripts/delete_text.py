@@ -19,6 +19,13 @@ def parse_rect(s):
         rect = raw_rect
     return page, rect
 
+def is_deletable_annot(annot):
+    if annot.type[1] in ('FreeText', 'Text'):
+        return True
+    if annot.type[1] == 'Stamp' and (annot.info.get('subject') == 'sioyek_markdown' or annot.info.get('name') == 'ImageStamp'):
+        return True
+    return False
+
 def main():
     if len(sys.argv) < 6:
         return
@@ -33,6 +40,14 @@ def main():
     doc = fitz.open(FILE_PATH)
     log_path = os.path.expanduser("~/.config/sioyek/add_text.log")
 
+    def safe_notify(msg=None):
+        try:
+            sioyek.reload()
+            if msg:
+                sioyek.set_status_string(msg)
+        except Exception:
+            pass
+
     try:
         if rect_arg == 'last':
             target_page_num = -1
@@ -46,20 +61,19 @@ def main():
             found = False
             for pno in pages_to_search:
                 page = doc[pno]
-                freetext_annots = [a for a in page.annots() if a.type[1] in ('FreeText', 'Text')]
-                if freetext_annots:
-                    last_annot = freetext_annots[-1]
+                target_annots = [a for a in page.annots() if is_deletable_annot(a)]
+                if target_annots:
+                    last_annot = target_annots[-1]
                     content = last_annot.info.get('content', '')
                     page.delete_annot(last_annot)
                     doc.saveIncr()
-                    sioyek.reload()
-                    sioyek.set_status_string(f"Deleted text: {content[:20]}")
+                    safe_notify(f"Deleted note: {content[:20]}")
                     with open(log_path, "a", encoding="utf-8") as f:
-                        f.write(f"Success: deleted last text '{content}' on page {pno}\n")
+                        f.write(f"Success: deleted last note '{content}' on page {pno}\n")
                     found = True
                     break
             if not found:
-                sioyek.set_status_string("No text annotation found to delete")
+                safe_notify("No text annotation found to delete")
             return
 
         selected_page, selected_rect = parse_rect(rect_arg)
@@ -87,20 +101,20 @@ def main():
         deleted_contents = []
 
         for annot in list(page.annots()):
-            if annot.type[1] in ('FreeText', 'Text'):
+            if is_deletable_annot(annot):
                 if annot.rect.intersects(search_rect):
                     content = annot.info.get('content', '')
                     deleted_contents.append(content)
                     page.delete_annot(annot)
                     deleted_count += 1
 
-        # Fallback: if clicking didn't directly intersect, find closest FreeText annotation within 30 points
+        # Fallback: if clicking didn't directly intersect, find closest annotation within 30 points
         if deleted_count == 0 and search_rect.width <= 40 and search_rect.height <= 40:
             click_point = fitz.Point((search_rect.x0 + search_rect.x1) / 2, (search_rect.y0 + search_rect.y1) / 2)
             best_annot = None
             best_dist = 30.0
             for annot in list(page.annots()):
-                if annot.type[1] in ('FreeText', 'Text'):
+                if is_deletable_annot(annot):
                     dist = annot.rect.distance_to_point(click_point)
                     if dist < best_dist:
                         best_dist = dist
@@ -113,15 +127,14 @@ def main():
 
         if deleted_count > 0:
             doc.saveIncr()
-            sioyek.reload()
-            msg = f"Deleted {deleted_count} text annotation(s)"
+            msg = f"Deleted {deleted_count} annotation(s)"
             if deleted_contents and deleted_contents[0]:
                 msg += f": {deleted_contents[0][:20]}"
-            sioyek.set_status_string(msg)
+            safe_notify(msg)
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"Success: deleted {deleted_count} annotations on page {selected_page}: {deleted_contents}\n")
         else:
-            sioyek.set_status_string("No text annotation found in selected area")
+            safe_notify("No text annotation found in selected area")
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"Notice: no annotations found to delete on page {selected_page} in rect {selected_rect}\n")
 
