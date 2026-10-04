@@ -591,6 +591,7 @@ void Document::reload(std::string password) {
 		fz_drop_link(context, page_link_pair.second);
 	}
 	cached_page_links.clear();
+	cached_markdown_annots.clear();
 
 	delete cached_toc_model;
 	cached_toc_model = nullptr;
@@ -2350,3 +2351,76 @@ float Document::max_y_offset() {
 	return get_accum_page_height(np - 1) + get_page_height(np - 1);
 
 }
+
+void Document::clear_markdown_annotations_cache() {
+	cached_markdown_annots.clear();
+}
+
+std::vector<fz_rect> Document::get_markdown_annotations_on_page(int page_idx) {
+	if (!doc) {
+		return {};
+	}
+	auto it = cached_markdown_annots.find(page_idx);
+	if (it != cached_markdown_annots.end()) {
+		return it->second;
+	}
+
+	std::vector<fz_rect> result;
+	pdf_document* pdf_doc = pdf_specifics(context, doc);
+	if (!pdf_doc || page_idx < 0 || page_idx >= num_pages()) {
+		cached_markdown_annots[page_idx] = result;
+		return result;
+	}
+
+	fz_try(context) {
+		fz_page* fzpage = fz_load_page(context, doc, page_idx);
+		if (fzpage) {
+			fz_rect page_bound = fz_bound_page(context, fzpage);
+			pdf_page* ppage = pdf_page_from_fz_page(context, fzpage);
+			if (ppage) {
+				for (pdf_annot* annot = pdf_first_annot(context, ppage); annot; annot = pdf_next_annot(context, annot)) {
+					if (pdf_annot_type(context, annot) == PDF_ANNOT_STAMP) {
+						pdf_obj* subj_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "Subj");
+						if (subj_obj) {
+							const char* subj_str = pdf_to_text_string(context, subj_obj);
+							if (subj_str && strstr(subj_str, "sioyek_markdown") != nullptr) {
+								fz_rect bound = pdf_bound_annot(context, annot);
+								bound.x0 -= page_bound.x0;
+								bound.x1 -= page_bound.x0;
+								bound.y0 -= page_bound.y0;
+								bound.y1 -= page_bound.y0;
+								result.push_back(bound);
+							}
+						}
+					}
+				}
+			}
+			fz_drop_page(context, fzpage);
+		}
+	}
+	fz_catch(context) {
+	}
+
+	cached_markdown_annots[page_idx] = result;
+	return result;
+}
+
+std::optional<std::pair<int, fz_rect>> Document::get_markdown_annotation_at(int page_idx, float doc_x, float doc_y) {
+	if (page_idx < 0) {
+		return std::nullopt;
+	}
+	const auto& annots = get_markdown_annotations_on_page(page_idx);
+	const float HIT_MARGIN = 2.0f;
+	for (size_t i = 0; i < annots.size(); i++) {
+		const auto& rect = annots[i];
+		float xmin = std::min(rect.x0, rect.x1) - HIT_MARGIN;
+		float xmax = std::max(rect.x0, rect.x1) + HIT_MARGIN;
+		float ymin = std::min(rect.y0, rect.y1) - HIT_MARGIN;
+		float ymax = std::max(rect.y0, rect.y1) + HIT_MARGIN;
+		if (doc_x >= xmin && doc_x <= xmax && doc_y >= ymin && doc_y <= ymax) {
+			return std::make_pair(static_cast<int>(i), rect);
+		}
+	}
+	return std::nullopt;
+}
+

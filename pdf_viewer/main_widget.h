@@ -141,6 +141,15 @@ public:
 	QTime last_text_select_time = QTime::currentTime();
 	QTime last_speed_update_time = QTime::currentTime();
 
+	bool annot_drag_active = false;
+	bool annot_drag_has_moved = false;
+	int annot_drag_page = -1;
+	fz_rect annot_drag_orig_rect = {0, 0, 0, 0};
+	fz_rect annot_drag_last_new_rect = {0, 0, 0, 0};
+	DocumentPos annot_drag_start_doc_pos = {-1, 0.0f, 0.0f};
+
+	void commit_markdown_annotation_move(int page, fz_rect orig_rect, fz_rect new_rect);
+
 	bool main_document_view_has_document();
 	std::optional<std::string> get_last_opened_file_checksum();
 

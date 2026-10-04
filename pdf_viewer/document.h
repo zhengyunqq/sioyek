@@ -59,6 +59,7 @@ private:
 	fz_context* context = nullptr;
 	std::wstring file_name;
 	std::unordered_map<int, fz_link*> cached_page_links;
+	std::unordered_map<int, std::vector<fz_rect>> cached_markdown_annots;
 	std::unordered_map<int, std::vector<fz_rect>> cached_flat_words;
 	std::unordered_map<int, std::vector<std::vector<fz_rect>>> cached_flat_word_chars;
 	QStandardItemModel* cached_toc_model = nullptr;
@@ -244,6 +245,10 @@ public:
 	std::vector<SearchResult> search_text(std::wstring query, bool case_sensitive, int begin_page, int min_page, int max_page);
 	std::vector<SearchResult> search_regex(std::wstring query, bool case_sensitive, int begin_page, int min_page, int max_page);
 	float max_y_offset();
+
+	std::vector<fz_rect> get_markdown_annotations_on_page(int page_idx);
+	std::optional<std::pair<int, fz_rect>> get_markdown_annotation_at(int page_idx, float doc_x, float doc_y);
+	void clear_markdown_annotations_cache();
 
 	friend class DocumentManager;
 };

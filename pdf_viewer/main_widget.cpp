@@ -208,6 +208,42 @@ void MainWidget::mouseMoveEvent(QMouseEvent* mouse_event) {
 
     NormalizedWindowPos normal_mpos = main_document_view->window_to_normalized_window_pos(mpos);
 
+    if (annot_drag_active) {
+        DocumentPos current_doc_pos = main_document_view->window_to_document_pos(mpos);
+        if (current_doc_pos.page == annot_drag_page && doc()) {
+            float dx = current_doc_pos.x - annot_drag_start_doc_pos.x;
+            float dy = current_doc_pos.y - annot_drag_start_doc_pos.y;
+            if (std::abs(dx) > 3.0f || std::abs(dy) > 3.0f || annot_drag_has_moved) {
+                annot_drag_has_moved = true;
+                setCursor(Qt::ClosedHandCursor);
+
+                float w = annot_drag_orig_rect.x1 - annot_drag_orig_rect.x0;
+                float h = annot_drag_orig_rect.y1 - annot_drag_orig_rect.y0;
+                float new_x0 = annot_drag_orig_rect.x0 + dx;
+                float new_y0 = annot_drag_orig_rect.y0 + dy;
+
+                float page_w = doc()->get_page_width(annot_drag_page);
+                float page_h = doc()->get_page_height(annot_drag_page);
+                if (new_x0 < 0.0f) new_x0 = 0.0f;
+                if (new_y0 < 0.0f) new_y0 = 0.0f;
+                if (new_x0 + w > page_w) new_x0 = page_w - w;
+                if (new_y0 + h > page_h) new_y0 = page_h - h;
+
+                fz_rect new_page_rect;
+                new_page_rect.x0 = new_x0;
+                new_page_rect.x1 = new_x0 + w;
+                new_page_rect.y0 = new_y0;
+                new_page_rect.y1 = new_y0 + h;
+                annot_drag_last_new_rect = new_page_rect;
+
+                fz_rect abs_rect = doc()->document_to_absolute_rect(annot_drag_page, new_page_rect, true);
+                opengl_widget->set_selected_rectangle(abs_rect);
+                validate_render();
+            }
+        }
+        return;
+    }
+
     if (rect_select_mode) {
         if (rect_select_begin.has_value()) {
 			AbsoluteDocumentPos abspos = main_document_view->window_to_absolute_document_pos(mpos);
@@ -267,10 +303,23 @@ void MainWidget::mouseMoveEvent(QMouseEvent* mouse_event) {
         }
     }
     else {
-        setCursor(Qt::ArrowCursor);
-        if (HOVER_OVERVIEW) {
-            opengl_widget->set_overview_page({});
-            invalidate_render();
+        bool is_over_annot = false;
+        if (main_document_view && main_document_view_has_document()) {
+            DocumentPos doc_pos = main_document_view->window_to_document_pos(mpos);
+            if (doc_pos.page >= 0) {
+                auto hit = doc()->get_markdown_annotation_at(doc_pos.page, doc_pos.x, doc_pos.y);
+                if (hit.has_value()) {
+                    is_over_annot = true;
+                    setCursor(Qt::OpenHandCursor);
+                }
+            }
+        }
+        if (!is_over_annot) {
+            setCursor(Qt::ArrowCursor);
+            if (HOVER_OVERVIEW) {
+                opengl_widget->set_overview_page({});
+                invalidate_render();
+            }
         }
     }
 
@@ -707,6 +756,14 @@ std::wstring MainWidget::get_status_string() {
 }
 
 void MainWidget::handle_escape() {
+
+    if (annot_drag_active) {
+        annot_drag_active = false;
+        if (opengl_widget) opengl_widget->clear_selected_rectangle();
+        validate_render();
+        setCursor(Qt::ArrowCursor);
+        return;
+    }
 
     // add high escape priority to overview and search, if any of them are escaped, do not escape any further
     if (opengl_widget) {
@@ -1680,6 +1737,29 @@ void MainWidget::mouseReleaseEvent(QMouseEvent* mevent) {
 	}
 
     if (mevent->button() == Qt::MouseButton::LeftButton) {
+        if (annot_drag_active) {
+            annot_drag_active = false;
+            opengl_widget->clear_selected_rectangle();
+            validate_render();
+            setCursor(Qt::ArrowCursor);
+
+            if (annot_drag_has_moved) {
+                commit_markdown_annotation_move(annot_drag_page, annot_drag_orig_rect, annot_drag_last_new_rect);
+                return;
+            }
+            else {
+                if (is_alt_pressed) {
+                    auto commands = command_manager->create_macro_command("", ALT_CLICK_COMMAND);
+                    commands->run(this);
+                    return;
+                }
+                else {
+                    handle_left_click({ mevent->pos().x(), mevent->pos().y() }, false, is_shift_pressed, is_control_pressed, is_alt_pressed);
+                    return;
+                }
+            }
+        }
+
         if (is_shift_pressed && is_control_pressed) {
 			auto commands = command_manager->create_macro_command("", CONTROL_SHIFT_CLICK_COMMAND);
 			commands->run(this);
@@ -1778,6 +1858,23 @@ void MainWidget::mousePressEvent(QMouseEvent* mevent) {
     bool is_alt_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::AltModifier);
 
     if (mevent->button() == Qt::MouseButton::LeftButton) {
+        if (!is_rotated() && main_document_view_has_document()) {
+            WindowPos mpos = { static_cast<float>(mevent->pos().x()), static_cast<float>(mevent->pos().y()) };
+            DocumentPos doc_pos = main_document_view->window_to_document_pos(mpos);
+            if (doc_pos.page >= 0) {
+                auto hit = doc()->get_markdown_annotation_at(doc_pos.page, doc_pos.x, doc_pos.y);
+                if (hit.has_value()) {
+                    annot_drag_active = true;
+                    annot_drag_has_moved = false;
+                    annot_drag_page = doc_pos.page;
+                    annot_drag_orig_rect = hit.value().second;
+                    annot_drag_last_new_rect = hit.value().second;
+                    annot_drag_start_doc_pos = doc_pos;
+                    setCursor(Qt::ClosedHandCursor);
+                    return;
+                }
+            }
+        }
         handle_left_click({ mevent->pos().x(), mevent->pos().y() }, true, is_shift_pressed, is_control_pressed, is_alt_pressed);
     }
 
@@ -2513,6 +2610,34 @@ void MainWidget::execute_command(std::wstring command, std::wstring text, bool w
     }
 
 }
+
+void MainWidget::commit_markdown_annotation_move(int page, fz_rect orig_rect, fz_rect new_rect) {
+    if (!main_document_view || !main_document_view_has_document()) {
+        return;
+    }
+    QString sioyek_path = QCoreApplication::applicationFilePath();
+    QString local_db = QString::fromStdWString(local_database_file_path.get_path());
+    QString shared_db = QString::fromStdWString(global_database_file_path.get_path());
+    QString file_path = QString::fromStdWString(main_document_view->get_document()->get_path());
+
+    QString coords = QString("%1 %2 %3 %4 %5")
+        .arg(page)
+        .arg(orig_rect.x0, 0, 'f', 2)
+        .arg(orig_rect.y0, 0, 'f', 2)
+        .arg(new_rect.x0, 0, 'f', 2)
+        .arg(new_rect.y0, 0, 'f', 2);
+
+    QStringList args;
+    args << "-m" << "sioyek.move_annotation"
+         << sioyek_path
+         << local_db
+         << shared_db
+         << file_path
+         << coords;
+
+    run_command(L"python", args, false);
+}
+
 void MainWidget::handle_paper_name_on_pointer(std::wstring paper_name, bool is_shift_pressed) {
     if (paper_name.size() > 5) {
         char type;
