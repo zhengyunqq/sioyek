@@ -7,6 +7,8 @@
 #include <qkeyevent.h>
 #include <qstring.h>
 #include <qstringlist.h>
+#include <qmessagebox.h>
+#include <qtimer.h>
 #include "input.h"
 #include "main_widget.h"
 #include "ui.h"
@@ -604,12 +606,36 @@ class DeletePortalCommand : public Command {
 };
 
 class DeleteAllPortalsCommand : public Command {
+	static void show_transient_status(MainWidget* widget, const std::wstring& msg) {
+		widget->set_status_message(msg);
+		QTimer::singleShot(3000, widget, [widget, msg]() {
+			if (widget->custom_status_message == msg) {
+				widget->set_status_message(L"");
+			}
+		});
+	}
+
 	void perform(MainWidget* widget) {
-		if (widget->main_document_view) {
-			widget->main_document_view->delete_all_portals();
+		Document* doc = widget->main_document_view ? widget->main_document_view->get_document() : nullptr;
+		if (doc == nullptr) return;
+
+		int count = doc->num_portals();
+		if (count == 0) {
+			show_transient_status(widget, L"No portals in this document");
+			return;
 		}
+
+		// this is irreversible, so ask first
+		QMessageBox::StandardButton answer = QMessageBox::question(widget,
+			"Delete all portals",
+			QString("Delete all %1 portal(s) in this document? This cannot be undone.").arg(count),
+			QMessageBox::Yes | QMessageBox::Cancel,
+			QMessageBox::Cancel);
+		if (answer != QMessageBox::Yes) return;
+
+		widget->main_document_view->delete_all_portals();
+		show_transient_status(widget, L"Deleted " + std::to_wstring(count) + L" portal(s)");
 		widget->validate_render();
-		widget->validate_ui();
 	}
 
 	std::string get_name() {
@@ -2720,11 +2746,10 @@ std::vector<std::unique_ptr<Command>> InputHandler::handle_key(QKeyEvent* key_ev
 
 	int key = 0;
 	if (!USE_LEGACY_KEYBINDS){
+		// "\x7f" (DEL) is what macOS reports as text for the delete keys; treat it like the other
+		// special texts so the key is matched by its key code (<backspace> / <delete>)
 		std::vector<QString> special_texts = {"\b", "\t", " ", "\r", "\n", "\x7f"};
-		if (key_event->key() == Qt::Key::Key_Backspace || key_event->key() == Qt::Key::Key_Delete) {
-			key = Qt::Key::Key_Backspace;
-		}
-		else if (((key_event->key() >= 'A') && (key_event->key() <= 'Z')) || ((key_event->text().size() > 0) &&
+		if (((key_event->key() >= 'A') && (key_event->key() <= 'Z')) || ((key_event->text().size() > 0) &&
 			(std::find(special_texts.begin(), special_texts.end(), key_event->text()) == special_texts.end()))) {
 			if (!control_pressed && !alt_pressed) {
 				// shift is already handled in the returned text

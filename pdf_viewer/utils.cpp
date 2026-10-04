@@ -19,6 +19,7 @@
 #include <qstringlist.h>
 #include <qcommandlineparser.h>
 #include <qdir.h>
+#include <qstandardpaths.h>
 #include <qurl.h>
 #include <qnetworkaccessmanager.h>
 #include <qnetworkrequest.h>
@@ -855,12 +856,17 @@ void run_command(std::wstring command, QStringList parameters, bool wait){
 	QProcess* process = new QProcess;
 	QString qcommand = QString::fromStdWString(command);
 #ifdef Q_OS_MAC
-	if (qcommand == "python" || qcommand == "python3") {
+	// GUI apps on macOS don't inherit the shell PATH and /usr/bin/python doesn't exist,
+	// so a bare `python` in a custom command would fail. Use PATH if it works, otherwise
+	// fall back to common interpreter locations.
+	if ((qcommand == "python" || qcommand == "python3") && QStandardPaths::findExecutable(qcommand).isEmpty()) {
+		QString home = QDir::homePath();
 		QStringList candidate_paths = {
-			"/Users/yunzheng/anaconda3/bin/python",
-			"/Users/yunzheng/anaconda3/bin/python3",
+			home + "/anaconda3/bin/python3",
+			home + "/miniconda3/bin/python3",
+			home + "/opt/anaconda3/bin/python3",
 			"/opt/homebrew/bin/python3",
-			"/usr/local/bin/python3"
+			"/usr/local/bin/python3",
 		};
 		for (const auto& cand : candidate_paths) {
 			if (QFile::exists(cand)) {

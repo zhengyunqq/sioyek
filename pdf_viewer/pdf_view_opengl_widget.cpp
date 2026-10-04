@@ -1335,6 +1335,9 @@ void PdfViewOpenGLWidget::set_overview_page(std::optional<OverviewState> overvie
 		if (offset < 0) {
 			overview.value().absolute_offset_y = 0;
 		}
+		if (offset > target->max_y_offset()) {
+			overview.value().absolute_offset_y = target->max_y_offset();
+		}
 		if (!this->overview_page.has_value()) {
 			overview_zoom_factor = 1.0f;
 			overview_pan_x = 0.0f;
