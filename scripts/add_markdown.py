@@ -238,16 +238,16 @@ def render_pill_badge_to_png_bytes(md_text):
     img.save(buf, "PNG")
     return buf.data().data(), w, h
 
-def render_card_to_qimage(md_text, card_width=260.0):
+def render_card_to_qimage(md_text, card_width=260.0, for_reader=False):
     """Render markdown text into a styled card QImage and return (qimage, width, height)."""
     app = QApplication.instance()
     if not app:
         app = QApplication(sys.argv)
 
-    padding = 10.0
+    padding = 12.0 if for_reader else 10.0
     content_width = max(60.0, float(card_width) - 2 * padding)
 
-    html = md_to_html(md_text, for_reader=False)
+    html = md_to_html(md_text, for_reader=for_reader)
     doc = QTextDocument()
     doc.setHtml(html)
     doc.setTextWidth(content_width)
@@ -471,7 +471,7 @@ class MarkdownEditorDialog(QDialog):
         lbl_mode.setStyleSheet("color: #24292f; font-size: 12px;")
         mode_bar.addWidget(lbl_mode)
 
-        self.radio_pill = QRadioButton("📌 胶囊便签 (轻量折叠，Shift+Click看大窗)")
+        self.radio_pill = QRadioButton("📌 胶囊便签 (轻量折叠，Option+Click看大窗)")
         self.radio_card = QRadioButton("📋 展开卡片 (直接在页面显示完整内容)")
         self.btn_group_mode = QButtonGroup(self)
         self.btn_group_mode.addButton(self.radio_pill)
@@ -560,14 +560,34 @@ class MarkdownEditorDialog(QDialog):
         container_layout = QVBoxLayout(self.preview_container)
         container_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         container_layout.setContentsMargins(10, 10, 10, 10)
+        container_layout.setSpacing(10)
 
+        # 1. Pill Badge Preview Box (shown in pill mode)
+        self.pill_preview_box = QWidget()
+        pill_box_layout = QVBoxLayout(self.pill_preview_box)
+        pill_box_layout.setContentsMargins(0, 0, 0, 4)
+        pill_box_layout.setSpacing(6)
+        pill_box_layout.setAlignment(Qt.AlignCenter)
+
+        self.lbl_pill_badge = QLabel()
+        self.lbl_pill_badge.setAlignment(Qt.AlignCenter)
+        self.lbl_pill_badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        pill_box_layout.addWidget(self.lbl_pill_badge)
+
+        self.lbl_pill_hint = QLabel("<span style='color: #64748b; font-size: 11px;'>💡 页面将折叠显示该胶囊，按 <b>Option+Click (⌥+单击)</b> 即可呼出大窗完整阅读</span>")
+        self.lbl_pill_hint.setAlignment(Qt.AlignCenter)
+        pill_box_layout.addWidget(self.lbl_pill_hint)
+
+        self.lbl_pill_content_header = QLabel("<span style='color: #475569; font-size: 12px; font-weight: bold;'>📖 笔记内容实时渲染预览（大窗展开效果）：</span>")
+        self.lbl_pill_content_header.setAlignment(Qt.AlignLeft)
+        pill_box_layout.addWidget(self.lbl_pill_content_header)
+
+        container_layout.addWidget(self.pill_preview_box)
+
+        # 2. Markdown Content / Card Preview Label (shows rendered content in both modes)
         self.lbl_preview = QLabel()
         self.lbl_preview.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         container_layout.addWidget(self.lbl_preview)
-
-        self.lbl_pill_hint = QLabel("<span style='color: #64748b; font-size: 11px;'>💡 页面将显示该胶囊，按 <b>Shift+Click</b> 即可呼出大窗口完整阅读</span>")
-        self.lbl_pill_hint.setAlignment(Qt.AlignCenter)
-        container_layout.addWidget(self.lbl_pill_hint)
 
         self.scroll_area.setWidget(self.preview_container)
         right_panel.addWidget(self.scroll_area)
@@ -672,13 +692,13 @@ class MarkdownEditorDialog(QDialog):
         if self.radio_pill.isChecked():
             self.mode = "pill"
             self.width_widget.setEnabled(False)
-            self.lbl_prev_sub.setText("页面上呈现迷你胶囊便签，点击或 Shift+Click 即可弹窗展开阅读")
-            self.lbl_pill_hint.setVisible(True)
+            self.lbl_prev_sub.setText("页面折叠呈现迷你胶囊，按 Option+Click 呼出大窗阅读")
+            self.pill_preview_box.setVisible(True)
         else:
             self.mode = "card"
             self.width_widget.setEnabled(True)
-            self.lbl_prev_sub.setText("页面上呈现完整展开卡片（可拖动中间分割线改变宽度）")
-            self.lbl_pill_hint.setVisible(False)
+            self.lbl_prev_sub.setText("页面直接嵌入展开卡片（可调整卡片宽度）")
+            self.pill_preview_box.setVisible(False)
         set_last_mode(self.mode)
         self.update_preview()
 
@@ -722,18 +742,36 @@ class MarkdownEditorDialog(QDialog):
     def update_preview(self):
         text = self.editor.toPlainText().strip()
         if not text:
-            text = "*（空白卡片）*"
+            text = "*（空白笔记内容）*"
+
+        v_w = self.scroll_area.viewport().width()
 
         if self.mode == "pill":
-            img, w, h = render_pill_badge_to_qimage(text)
+            # 1. Update compact pill badge
+            badge_img, badge_w, badge_h = render_pill_badge_to_qimage(text)
+            badge_pix = QPixmap.fromImage(badge_img).scaled(
+                int(badge_w), int(badge_h), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self.lbl_pill_badge.setPixmap(badge_pix)
+            self.lbl_pill_badge.setFixedSize(badge_pix.size())
+
+            # 2. Update real-time Markdown content preview below the badge
+            content_w = max(240.0, float(v_w - 28))
+            img, w, h = render_card_to_qimage(text, content_w, for_reader=True)
+            pix = QPixmap.fromImage(img).scaled(
+                int(w), int(h), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self.lbl_preview.setPixmap(pix)
+            self.lbl_preview.setFixedSize(pix.size())
         else:
             width = float(self.spin_width.value())
-            img, w, h = render_card_to_qimage(text, width)
+            img, w, h = render_card_to_qimage(text, width, for_reader=False)
+            pix = QPixmap.fromImage(img).scaled(
+                int(w), int(h), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+            self.lbl_preview.setPixmap(pix)
+            self.lbl_preview.setFixedSize(pix.size())
 
-        pix = QPixmap.fromImage(img)
-        preview_pix = pix.scaled(int(w), int(h), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.lbl_preview.setPixmap(preview_pix)
-        self.lbl_preview.setFixedSize(preview_pix.size())
         self.preview_container.adjustSize()
 
     def showEvent(self, event):
