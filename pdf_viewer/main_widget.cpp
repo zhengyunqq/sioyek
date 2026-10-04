@@ -1360,13 +1360,9 @@ void MainWidget::handle_left_click(WindowPos click_pos, bool down, bool is_shift
 
     if (rect_select_mode) {
         if (down == true) {
-            if (rect_select_end.has_value()) {
-                //clicked again after selecting, we should clear the selected rectangle
-                clear_selected_rect();
-            }
-            else {
-                rect_select_begin = abs_doc_pos;
-            }
+            rect_select_begin = abs_doc_pos;
+            rect_select_end = {};
+            opengl_widget->clear_selected_rectangle();
         }
         else {
             if (rect_select_begin.has_value()) {
@@ -2417,16 +2413,18 @@ void MainWidget::execute_command(std::wstring command, std::wstring text, bool w
             float min_y = std::min(rect_requirement.value().y0, rect_requirement.value().y1);
             float max_y = std::max(rect_requirement.value().y0, rect_requirement.value().y1);
 
-            AbsoluteDocumentPos top_left = { min_x, min_y };
-            AbsoluteDocumentPos bottom_right = { max_x, max_y };
-            DocumentPos top_left_document = main_document_view->get_document()->absolute_to_page_pos(top_left);
-            DocumentPos bottom_right_document = main_document_view->get_document()->absolute_to_page_pos(bottom_right);
+            float mid_y = (min_y + max_y) / 2.0f;
+            DocumentPos mid_doc = main_document_view->get_document()->absolute_to_page_pos({ 0, mid_y });
+            int page = mid_doc.page;
 
-            selected_rect_rect.x0 = top_left_document.x;
-            selected_rect_rect.y0 = top_left_document.y;
-            selected_rect_rect.x1 = bottom_right_document.x;
-            selected_rect_rect.y1 = bottom_right_document.y;
-            selected_rect_page = top_left_document.page;
+            float page_width = main_document_view->get_document()->get_page_width(page);
+            float page_accum_y = main_document_view->get_document()->get_accum_page_height(page);
+
+            selected_rect_rect.x0 = page_width / 2.0f + min_x;
+            selected_rect_rect.x1 = page_width / 2.0f + max_x;
+            selected_rect_rect.y0 = min_y - page_accum_y;
+            selected_rect_rect.y1 = max_y - page_accum_y;
+            selected_rect_page = page;
             has_rect = true;
         }
         else if (get_selected_rect_document(selected_rect_page, selected_rect_rect)) {
@@ -3811,16 +3809,17 @@ void MainWidget::reset_highlight_links() {
 
 void MainWidget::set_rect_select_mode(bool mode) {
     rect_select_mode = mode;
-    if (mode == true) {
-        opengl_widget->set_selected_rectangle({ 0, 0, 0, 0 });
+    rect_select_begin = {};
+    rect_select_end = {};
+    if (mode == false) {
+        opengl_widget->clear_selected_rectangle();
     }
 }
 
 void MainWidget::clear_selected_rect() {
     opengl_widget->clear_selected_rectangle();
-    //rect_select_mode = false;
-    //rect_select_begin = {};
-    //rect_select_end = {};
+    rect_select_begin = {};
+    rect_select_end = {};
 }
 
 std::optional<fz_rect> MainWidget::get_selected_rect_absolute() {
@@ -3829,27 +3828,24 @@ std::optional<fz_rect> MainWidget::get_selected_rect_absolute() {
 
 bool MainWidget::get_selected_rect_document(int& out_page, fz_rect& out_rect) {
     std::optional<fz_rect> absrect = get_selected_rect_absolute();
-    if (absrect) {
+    if (absrect && main_document_view_has_document()) {
+        float min_x = std::min(absrect.value().x0, absrect.value().x1);
+        float max_x = std::max(absrect.value().x0, absrect.value().x1);
+        float min_y = std::min(absrect.value().y0, absrect.value().y1);
+        float max_y = std::max(absrect.value().y0, absrect.value().y1);
 
-        AbsoluteDocumentPos top_left;
-        AbsoluteDocumentPos bottom_right;
+        float mid_y = (min_y + max_y) / 2.0f;
+        DocumentPos mid_doc = main_document_view->get_document()->absolute_to_page_pos({ 0, mid_y });
+        int page = mid_doc.page;
 
-        top_left.x = absrect.value().x0;
-        top_left.y = absrect.value().y0;
-        bottom_right.x = absrect.value().x1;
-        bottom_right.y = absrect.value().y1;
+        float page_width = main_document_view->get_document()->get_page_width(page);
+        float page_accum_y = main_document_view->get_document()->get_accum_page_height(page);
 
-        DocumentPos top_left_document =  main_document_view->get_document()->absolute_to_page_pos(top_left);
-        DocumentPos bottom_right_document =  main_document_view->get_document()->absolute_to_page_pos(bottom_right);
-
-        fz_rect document_rect;
-        document_rect.x0 = top_left_document.x;
-        document_rect.y0 = top_left_document.y;
-        document_rect.x1 = bottom_right_document.x;
-        document_rect.y1 = bottom_right_document.y;
-
-        out_rect = document_rect;
-        out_page = top_left_document.page;
+        out_rect.x0 = page_width / 2.0f + min_x;
+        out_rect.x1 = page_width / 2.0f + max_x;
+        out_rect.y0 = min_y - page_accum_y;
+        out_rect.y1 = max_y - page_accum_y;
+        out_page = page;
 
         return true;
     }

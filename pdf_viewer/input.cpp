@@ -2143,8 +2143,11 @@ public:
 
 	std::optional<Requirement> next_requirement(MainWidget* widget) {
 		if (command_requires_rect(raw_command) && (!command_rect.has_value())) {
-			if (widget->get_selected_rect_absolute().has_value()) {
-				command_rect = widget->get_selected_rect_absolute().value();
+			auto maybe_rect = widget->get_selected_rect_absolute();
+			if (maybe_rect.has_value() &&
+				(fabs(maybe_rect.value().x1 - maybe_rect.value().x0) > 5.0f ||
+				 fabs(maybe_rect.value().y1 - maybe_rect.value().y0) > 5.0f)) {
+				command_rect = maybe_rect.value();
 			}
 			else {
 				Requirement req = { RequirementType::Rect, "Command Rect"};

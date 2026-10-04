@@ -903,7 +903,7 @@ DocumentPos Document::absolute_to_page_pos(AbsoluteDocumentPos absp){
 		return {0, 0.0f, 0.0f};
 	}
 
-	int i = (std::lower_bound(
+	int i = (std::upper_bound(
 		accum_page_heights.begin(),
 		accum_page_heights.end(), absp.y) -  accum_page_heights.begin()) - 1;
 	i = std::max(0, i);
@@ -935,10 +935,8 @@ int Document::get_offset_page_number(float y_offset) {
 		return -1;
 	}
 
-	auto it = std::lower_bound(accum_page_heights.begin(), accum_page_heights.end(), y_offset);
+	auto it = std::upper_bound(accum_page_heights.begin(), accum_page_heights.end(), y_offset);
 
-	// std::lower_bound returns an iterator pointing to the first element of the vector not less than y_offset,
-	// but we are looking for the last element of vector that is less than y_offset
 	if (it > accum_page_heights.begin()) {
 		it--;
 	}
