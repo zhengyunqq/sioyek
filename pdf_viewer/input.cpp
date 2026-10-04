@@ -765,6 +765,9 @@ class OpenDocumentEmbeddedFromCurrentPathCommand : public Command {
 
 class CopyCommand : public Command {
 	void perform(MainWidget* widget) {
+		if (widget->copy_latex_source_if_available()) {
+			return;
+		}
 		copy_to_clipboard(widget->selected_text);
 	}
 

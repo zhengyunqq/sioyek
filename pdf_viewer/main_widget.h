@@ -287,6 +287,7 @@ public:
 	void set_inverse_search_command(const std::wstring& new_command);
 	int get_current_monitor_width(); int get_current_monitor_height();
 	void synctex_under_pos(WindowPos position);
+	bool copy_latex_source_if_available();
 	std::optional<std::wstring> get_paper_name_under_cursor();
 	void set_status_message(std::wstring new_status_string);
 	void remove_self_from_windows();

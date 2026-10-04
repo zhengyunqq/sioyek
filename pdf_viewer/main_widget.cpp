@@ -39,6 +39,10 @@
 #include <qmimedata.h>
 #include <qscreen.h>
 #include <qfileinfo.h>
+#include <qfile.h>
+#include <qtextstream.h>
+#include <qregularexpression.h>
+#include <algorithm>
 
 
 #include "input.h"
@@ -3181,6 +3185,375 @@ void MainWidget::synctex_under_pos(WindowPos position) {
 	}
 	synctex_scanner_free(scanner);
 
+}
+
+namespace {
+
+QString strip_latex_comment(const QString& line) {
+	int idx = 0;
+	while ((idx = line.indexOf('%', idx)) != -1) {
+		if (idx == 0 || line[idx - 1] != '\\') {
+			return line.left(idx);
+		}
+		idx++;
+	}
+	return line;
+}
+
+void balance_latex_range(const QStringList& all_lines, int& min_line, int& max_line, int max_search = 50) {
+	QRegularExpression env_regex(R"(\\((?:begin|end))\{([a-zA-Z0-9*]+)\})");
+
+	// 1. Check for unclosed \end{...} in [min_line, max_line]
+	std::vector<QString> stack;
+	for (int i = min_line; i <= max_line; ++i) {
+		QString content = strip_latex_comment(all_lines[i - 1]);
+		auto it = env_regex.globalMatch(content);
+		while (it.hasNext()) {
+			auto match = it.next();
+			QString kind = match.captured(1);
+			QString name = match.captured(2);
+			if (name == "document") continue;
+
+			if (kind == "begin") {
+				stack.push_back(name);
+			} else if (kind == "end") {
+				if (!stack.empty() && stack.back() == name) {
+					stack.pop_back();
+				} else {
+					// Unmatched \end{name}, search upwards before min_line
+					QString target = name;
+					int search_limit = std::max(1, min_line - max_search);
+					for (int prev_i = min_line - 1; prev_i >= search_limit; --prev_i) {
+						QString prev_content = strip_latex_comment(all_lines[prev_i - 1]);
+						if (prev_content.contains("\\begin{" + target + "}")) {
+							min_line = prev_i;
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Check for unclosed \begin{...} in updated [min_line, max_line]
+	stack.clear();
+	for (int i = min_line; i <= max_line; ++i) {
+		QString content = strip_latex_comment(all_lines[i - 1]);
+		auto it = env_regex.globalMatch(content);
+		while (it.hasNext()) {
+			auto match = it.next();
+			QString kind = match.captured(1);
+			QString name = match.captured(2);
+			if (name == "document") continue;
+
+			if (kind == "begin") {
+				stack.push_back(name);
+			} else if (kind == "end") {
+				if (!stack.empty() && stack.back() == name) {
+					stack.pop_back();
+				}
+			}
+		}
+	}
+
+	// Any remaining on stack need matching \end{name} downwards
+	while (!stack.empty()) {
+		QString target = stack.back();
+		stack.pop_back();
+		int search_limit = std::min((int)all_lines.size(), max_line + max_search);
+		for (int next_i = max_line + 1; next_i <= search_limit; ++next_i) {
+			QString next_content = strip_latex_comment(all_lines[next_i - 1]);
+			if (next_content.contains("\\end{" + target + "}")) {
+				max_line = next_i;
+				break;
+			}
+		}
+	}
+
+	// 3. Display math delimiters \[ and \]
+	int count_open_bracket = 0;
+	int count_close_bracket = 0;
+	int count_double_dollar = 0;
+	for (int i = min_line; i <= max_line; ++i) {
+		QString c = strip_latex_comment(all_lines[i - 1]);
+		count_open_bracket += c.count("\\[");
+		count_close_bracket += c.count("\\]");
+		count_double_dollar += c.count("$$");
+	}
+
+	if (count_close_bracket > count_open_bracket) {
+		int search_limit = std::max(1, min_line - max_search);
+		for (int prev_i = min_line - 1; prev_i >= search_limit; --prev_i) {
+			if (strip_latex_comment(all_lines[prev_i - 1]).contains("\\[")) {
+				min_line = prev_i;
+				break;
+			}
+		}
+	} else if (count_open_bracket > count_close_bracket) {
+		int search_limit = std::min((int)all_lines.size(), max_line + max_search);
+		for (int next_i = max_line + 1; next_i <= search_limit; ++next_i) {
+			if (strip_latex_comment(all_lines[next_i - 1]).contains("\\]")) {
+				max_line = next_i;
+				break;
+			}
+		}
+	}
+
+	if (count_double_dollar % 2 != 0) {
+		int search_limit = std::min((int)all_lines.size(), max_line + max_search);
+		bool found = false;
+		for (int next_i = max_line + 1; next_i <= search_limit; ++next_i) {
+			if (strip_latex_comment(all_lines[next_i - 1]).contains("$$")) {
+				max_line = next_i;
+				found = true;
+				break;
+			}
+		}
+		if (!found) {
+			search_limit = std::max(1, min_line - max_search);
+			for (int prev_i = min_line - 1; prev_i >= search_limit; --prev_i) {
+				if (strip_latex_comment(all_lines[prev_i - 1]).contains("$$")) {
+					min_line = prev_i;
+					break;
+				}
+			}
+		}
+	}
+}
+
+QString extract_latex_subphrase(const QString& line, const QString& selected_text) {
+	QString sel = selected_text.trimmed();
+	if (sel.isEmpty()) return line;
+
+	int idx = line.indexOf(sel);
+	if (idx != -1) {
+		int brace_open = line.lastIndexOf('{', idx);
+		int brace_close = line.indexOf('}', idx + sel.length());
+		if (brace_open != -1 && brace_close == idx + sel.length()) {
+			int backslash = line.lastIndexOf('\\', brace_open);
+			if (backslash != -1 && backslash < brace_open) {
+				bool valid_cmd = true;
+				for (int k = backslash + 1; k < brace_open; ++k) {
+					if (!line[k].isLetter() && line[k] != '*') {
+						valid_cmd = false;
+						break;
+					}
+				}
+				if (valid_cmd) {
+					return line.mid(backslash, brace_close - backslash + 1);
+				}
+			}
+		}
+
+		if (idx > 0 && idx + sel.length() < line.length()) {
+			if (line[idx - 1] == '$' && line[idx + sel.length()] == '$') {
+				return "$" + sel + "$";
+			}
+		}
+
+		if (sel.length() < line.trimmed().length() * 0.8) {
+			return sel;
+		}
+	}
+
+	return line;
+}
+
+} // namespace
+
+bool MainWidget::copy_latex_source_if_available() {
+	if (!main_document_view || !doc()) {
+		return false;
+	}
+
+	std::wstring docpath = doc()->get_path();
+	if (docpath.empty()) {
+		return false;
+	}
+
+	std::string docpath_utf8 = utf8_encode(docpath);
+	synctex_scanner_p scanner = synctex_scanner_new_with_output_file(docpath_utf8.c_str(), nullptr, 1);
+	if (!scanner) {
+		return false;
+	}
+
+	std::vector<DocumentPos> query_points;
+
+	// Check Source A: selected_character_rects
+	const auto& char_rects = main_document_view->selected_character_rects;
+	if (!char_rects.empty()) {
+		query_points.push_back(doc()->absolute_to_page_pos({
+			(char_rects.front().x0 + char_rects.front().x1) * 0.5f,
+			(char_rects.front().y0 + char_rects.front().y1) * 0.5f
+		}));
+		if (char_rects.size() > 4) {
+			size_t idxs[] = { char_rects.size() / 4, char_rects.size() / 2, (char_rects.size() * 3) / 4 };
+			for (size_t idx : idxs) {
+				query_points.push_back(doc()->absolute_to_page_pos({
+					(char_rects[idx].x0 + char_rects[idx].x1) * 0.5f,
+					(char_rects[idx].y0 + char_rects[idx].y1) * 0.5f
+				}));
+			}
+		}
+		query_points.push_back(doc()->absolute_to_page_pos({
+			(char_rects.back().x0 + char_rects.back().x1) * 0.5f,
+			(char_rects.back().y0 + char_rects.back().y1) * 0.5f
+		}));
+	}
+
+	// Check Source B: selected rectangle
+	int rect_page = -1;
+	fz_rect doc_rect = { 0, 0, 0, 0 };
+	if (query_points.empty() && get_selected_rect_document(rect_page, doc_rect)) {
+		float mid_x = (doc_rect.x0 + doc_rect.x1) * 0.5f;
+		float mid_y = (doc_rect.y0 + doc_rect.y1) * 0.5f;
+		query_points.push_back({ rect_page, mid_x, doc_rect.y0 });
+		query_points.push_back({ rect_page, mid_x, mid_y });
+		query_points.push_back({ rect_page, mid_x, doc_rect.y1 });
+		query_points.push_back({ rect_page, doc_rect.x0, mid_y });
+		query_points.push_back({ rect_page, doc_rect.x1, mid_y });
+	}
+
+	// Check Source C: selection_begin and selection_end if selected_text is not empty
+	if (query_points.empty() && !selected_text.empty()) {
+		auto pt1 = doc()->absolute_to_page_pos(selection_begin);
+		auto pt2 = doc()->absolute_to_page_pos(selection_end);
+		query_points.push_back(pt1);
+		query_points.push_back({ pt1.page, (pt1.x + pt2.x) * 0.5f, (pt1.y + pt2.y) * 0.5f });
+		query_points.push_back(pt2);
+	}
+
+	if (query_points.empty()) {
+		synctex_scanner_free(scanner);
+		return false;
+	}
+
+	// Query SyncTeX
+	std::map<QString, std::vector<int>> file_to_lines;
+	for (const auto& pt : query_points) {
+		if (pt.page < 0) continue;
+		int stat = synctex_edit_query(scanner, pt.page + 1, pt.x, pt.y);
+		if (stat > 0) {
+			synctex_node_p node;
+			while ((node = synctex_scanner_next_result(scanner))) {
+				int line = synctex_node_line(node);
+				int tag = synctex_node_tag(node);
+				const char* raw_fname = synctex_scanner_get_name(scanner, tag);
+				if (!raw_fname || line <= 0) continue;
+
+				QString qfile_name = QString::fromUtf8(raw_fname);
+				QFileInfo file_info(qfile_name);
+				if (!file_info.isAbsolute()) {
+					QFileInfo doc_info(QString::fromStdWString(docpath));
+					file_info = QFileInfo(doc_info.dir(), qfile_name);
+				}
+				if (!file_info.exists()) continue;
+
+				QString resolved_path = file_info.absoluteFilePath();
+#ifdef Q_OS_WIN
+				resolved_path = QDir::toNativeSeparators(resolved_path);
+				if (resolved_path.length() > 0) {
+					resolved_path[0] = resolved_path[0].toUpper();
+				}
+#endif
+				file_to_lines[resolved_path].push_back(line);
+				break; // best result for this point
+			}
+		}
+	}
+
+	synctex_scanner_free(scanner);
+
+	if (file_to_lines.empty()) {
+		return false;
+	}
+
+	// Pick the file with the most query hits, prioritizing .tex files
+	QString best_file;
+	size_t max_hits = 0;
+	for (const auto& [fname, lvec] : file_to_lines) {
+		size_t weight = lvec.size();
+		if (fname.endsWith(".tex", Qt::CaseInsensitive)) {
+			weight += 1000;
+		}
+		if (weight > max_hits) {
+			max_hits = weight;
+			best_file = fname;
+		}
+	}
+
+	if (best_file.isEmpty() || file_to_lines[best_file].empty()) {
+		return false;
+	}
+
+	const auto& lines_hit = file_to_lines[best_file];
+	int min_line = *std::min_element(lines_hit.begin(), lines_hit.end());
+	int max_line = *std::max_element(lines_hit.begin(), lines_hit.end());
+
+	// Read the LaTeX source file
+	QFile file(best_file);
+	if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+		return false;
+	}
+	QTextStream in(&file);
+	QStringList all_lines;
+	while (!in.atEnd()) {
+		all_lines.append(in.readLine());
+	}
+	file.close();
+
+	if (all_lines.isEmpty()) {
+		return false;
+	}
+
+	min_line = std::clamp(min_line, 1, (int)all_lines.size());
+	max_line = std::clamp(max_line, 1, (int)all_lines.size());
+	if (min_line > max_line) std::swap(min_line, max_line);
+
+	// Balance LaTeX environments & delimiters
+	balance_latex_range(all_lines, min_line, max_line);
+
+	QString result_text;
+	if (min_line == max_line && !selected_text.empty()) {
+		result_text = extract_latex_subphrase(all_lines[min_line - 1], QString::fromStdWString(selected_text));
+	} else {
+		QStringList snippet_lines;
+		for (int i = min_line - 1; i <= max_line - 1; ++i) {
+			snippet_lines.append(all_lines[i]);
+		}
+		while (!snippet_lines.isEmpty() && snippet_lines.first().trimmed().isEmpty()) {
+			snippet_lines.removeFirst();
+		}
+		while (!snippet_lines.isEmpty() && snippet_lines.last().trimmed().isEmpty()) {
+			snippet_lines.removeLast();
+		}
+		result_text = snippet_lines.join("\n");
+	}
+
+	if (result_text.trimmed().isEmpty()) {
+		return false;
+	}
+
+	copy_to_clipboard(result_text.toStdWString());
+
+	// If a rectangle was selected, clear it
+	if (get_selected_rect_absolute().has_value()) {
+		clear_selected_rect();
+	}
+
+	// Show status message with auto-clear after 3 seconds
+	QString status;
+	if (min_line == max_line) {
+		status = QString("Copied LaTeX source (line %1)").arg(min_line);
+	} else {
+		status = QString("Copied LaTeX source (lines %1-%2)").arg(min_line).arg(max_line);
+	}
+	set_status_message(status.toStdWString());
+	QTimer::singleShot(3000, this, [this]() {
+		set_status_message(L"");
+	});
+
+	return true;
 }
 
 void MainWidget::set_status_message(std::wstring new_status_string) {
