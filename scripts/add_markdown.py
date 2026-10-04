@@ -298,6 +298,28 @@ class PreviewScrollArea(QScrollArea):
             self.dialog.on_preview_area_resized()
 
 
+def setup_macos_accessory():
+    """Configure app as macOS accessory so it does not clutter the Dock."""
+    try:
+        import AppKit
+        ns_app = AppKit.NSApplication.sharedApplication()
+        ns_app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)
+    except Exception:
+        pass
+
+
+def activate_macos_window(widget):
+    """Brings the dialog to front and forces focus on macOS."""
+    widget.raise_()
+    widget.activateWindow()
+    try:
+        import AppKit
+        ns_app = AppKit.NSApplication.sharedApplication()
+        ns_app.activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
+
+
 class MarkdownReaderDialog(QDialog):
     """Large popup window for comfortably reading rendered Markdown with LaTeX formulas."""
     def __init__(self, md_text, page_num=1, parent=None):
@@ -378,11 +400,22 @@ class MarkdownReaderDialog(QDialog):
         self.viewer.setHtml(reader_html)
         layout.addWidget(self.viewer, 1)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        activate_macos_window(self)
+
+    def closeEvent(self, event):
+        self.action = "close"
+        event.accept()
+        super().closeEvent(event)
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
+            self.action = "close"
             self.reject()
             return
         if event.key() == Qt.Key_W and (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
+            self.action = "close"
             self.reject()
             return
         if event.key() == Qt.Key_E and not (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
@@ -703,6 +736,26 @@ class MarkdownEditorDialog(QDialog):
         self.lbl_preview.setFixedSize(preview_pix.size())
         self.preview_container.adjustSize()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        activate_macos_window(self)
+
+    def closeEvent(self, event):
+        self.action = "cancel"
+        event.accept()
+        super().closeEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.action = "cancel"
+            self.reject()
+            return
+        if event.key() == Qt.Key_W and (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
+            self.action = "cancel"
+            self.reject()
+            return
+        super().keyPressEvent(event)
+
     def on_save(self):
         self.action = "save"
         self.accept()
@@ -739,6 +792,7 @@ def main():
     app = QApplication.instance()
     if not app:
         app = QApplication(sys.argv)
+    setup_macos_accessory()
 
     sioyek = Sioyek(SIOYEK_PATH, LOCAL_DATABASE_PATH, SHARED_DATABASE_PATH)
     log_path = os.path.expanduser("~/.config/sioyek/add_text.log")
@@ -748,7 +802,8 @@ def main():
         selected_page, selected_rect = parse_rect(rect_string)
 
         if selected_page < 0 or selected_page >= len(doc):
-            return
+            app.quit()
+            sys.exit(0)
 
         page = doc[selected_page]
 
@@ -843,10 +898,15 @@ def main():
             new_text = dialog.get_text()
             card_width = dialog.get_width()
             mode = dialog.get_mode()
+            dialog.close()
+            dialog.deleteLater()
 
         def safe_notify(msg=None):
             try:
                 sioyek.reload()
+            except Exception:
+                pass
+            try:
                 if msg:
                     sioyek.set_status_string(msg)
             except Exception:
@@ -854,7 +914,8 @@ def main():
 
         if action == "cancel":
             doc.close()
-            return
+            app.quit()
+            sys.exit(0)
 
         if action == "delete":
             if existing_annot is not None:
@@ -865,7 +926,8 @@ def main():
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(f"Success: deleted Markdown note on page {selected_page}: '{content}'\n")
             doc.close()
-            return
+            app.quit()
+            sys.exit(0)
 
         if action == "save":
             stripped_text = new_text.strip()
@@ -875,7 +937,8 @@ def main():
                     doc.saveIncr()
                     safe_notify("Markdown note deleted")
                 doc.close()
-                return
+                app.quit()
+                sys.exit(0)
 
             if mode == "pill":
                 png_bytes, final_w, final_h = render_pill_badge_to_png_bytes(stripped_text)
@@ -904,12 +967,18 @@ def main():
                 f.write(f"Success: {msg} on page {selected_page} rect {final_rect}\n")
 
         doc.close()
+        app.quit()
+        sys.exit(0)
 
     except Exception as e:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"Error in add_markdown: {e}\n")
             traceback.print_exc(file=f)
-        raise
+        try:
+            app.quit()
+        except Exception:
+            pass
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()

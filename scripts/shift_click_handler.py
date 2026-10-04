@@ -21,6 +21,7 @@ try:
         MarkdownEditorDialog,
         render_pill_badge_to_png_bytes,
         render_card_to_png_bytes,
+        setup_macos_accessory,
     )
     from .sioyek import Sioyek, clean_path
 except ImportError:
@@ -29,6 +30,7 @@ except ImportError:
         MarkdownEditorDialog,
         render_pill_badge_to_png_bytes,
         render_card_to_png_bytes,
+        setup_macos_accessory,
     )
     from sioyek import Sioyek, clean_path
 
@@ -74,7 +76,7 @@ def main():
     if page_num is None:
         # Unable to parse mouse pos, fallback to native overview
         sioyek.run_command("overview_under_cursor")
-        return
+        sys.exit(0)
 
     try:
         doc = fitz.open(FILE_PATH)
@@ -82,12 +84,12 @@ def main():
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"Error opening document {FILE_PATH}: {e}\n")
         sioyek.run_command("overview_under_cursor")
-        return
+        sys.exit(0)
 
     if page_num < 0 or page_num >= len(doc):
         doc.close()
         sioyek.run_command("overview_under_cursor")
-        return
+        sys.exit(0)
 
     page = doc[page_num]
     click_x = mouse_x + page.rect.x0
@@ -115,7 +117,7 @@ def main():
         # Not clicking on a Markdown note -> Fall back to Sioyek's built-in overview
         doc.close()
         sioyek.run_command("overview_under_cursor")
-        return
+        sys.exit(0)
 
     # Sort best matching Markdown annotation
     candidates.sort(key=lambda x: x[0], reverse=True)
@@ -128,15 +130,20 @@ def main():
     app = QApplication.instance()
     if not app:
         app = QApplication(sys.argv)
+    setup_macos_accessory()
 
     reader = MarkdownReaderDialog(md_text, page_num=page_num + 1)
     reader.exec_()
+    reader_action = reader.action
+    reader.close()
+    reader.deleteLater()
 
-    if reader.action == "close":
+    if reader_action == "close":
         doc.close()
-        return
+        app.quit()
+        sys.exit(0)
 
-    if reader.action == "edit":
+    if reader_action == "edit":
         # Transition seamlessly to Markdown Editor Dialog
         editor = MarkdownEditorDialog(
             initial_text=md_text,
@@ -146,39 +153,51 @@ def main():
             initial_mode=existing_mode
         )
         editor.exec_()
+        editor_action = editor.action
+        editor_text = editor.get_text()
+        editor_mode = editor.get_mode()
+        editor_width = editor.get_width()
+        editor.close()
+        editor.deleteLater()
 
         def safe_notify(msg=None):
             try:
                 sioyek.reload()
+            except Exception:
+                pass
+            try:
                 if msg:
                     sioyek.set_status_string(msg)
             except Exception:
                 pass
 
-        if editor.action == "cancel":
+        if editor_action == "cancel":
             doc.close()
-            return
+            app.quit()
+            sys.exit(0)
 
-        if editor.action == "delete":
+        if editor_action == "delete":
             page.delete_annot(target_annot)
             doc.saveIncr()
             doc.close()
             safe_notify("Deleted Markdown note")
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"Success: deleted note on page {page_num}\n")
-            return
+            app.quit()
+            sys.exit(0)
 
-        if editor.action == "save":
-            new_text = editor.get_text().strip()
+        if editor_action == "save":
+            new_text = editor_text.strip()
             if not new_text:
                 page.delete_annot(target_annot)
                 doc.saveIncr()
                 doc.close()
                 safe_notify("Deleted Markdown note")
-                return
+                app.quit()
+                sys.exit(0)
 
-            new_mode = editor.get_mode()
-            card_width = editor.get_width()
+            new_mode = editor_mode
+            card_width = editor_width
             target_x0 = target_annot.rect.x0
             target_y0 = target_annot.rect.y0
 
@@ -206,6 +225,9 @@ def main():
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"Success: {msg} on page {page_num} rect {final_rect}\n")
 
+            app.quit()
+            sys.exit(0)
 
-if __name__ == "__main__":
-    main()
+    doc.close()
+    app.quit()
+    sys.exit(0)
