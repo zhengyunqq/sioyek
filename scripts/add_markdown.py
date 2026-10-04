@@ -574,14 +574,6 @@ class MarkdownEditorDialog(QDialog):
         self.lbl_pill_badge.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         pill_box_layout.addWidget(self.lbl_pill_badge)
 
-        self.lbl_pill_hint = QLabel("<span style='color: #64748b; font-size: 11px;'>💡 页面将折叠显示该胶囊，按 <b>Option+Click (⌥+单击)</b> 即可呼出大窗完整阅读</span>")
-        self.lbl_pill_hint.setAlignment(Qt.AlignCenter)
-        pill_box_layout.addWidget(self.lbl_pill_hint)
-
-        self.lbl_pill_content_header = QLabel("<span style='color: #475569; font-size: 12px; font-weight: bold;'>📖 笔记内容实时渲染预览（大窗展开效果）：</span>")
-        self.lbl_pill_content_header.setAlignment(Qt.AlignLeft)
-        pill_box_layout.addWidget(self.lbl_pill_content_header)
-
         container_layout.addWidget(self.pill_preview_box)
 
         # 2. Markdown Content / Card Preview Label (shows rendered content in both modes)
