@@ -38,6 +38,7 @@
 #include <qguiapplication.h>
 #include <qmimedata.h>
 #include <qscreen.h>
+#include <qfileinfo.h>
 
 
 #include "input.h"
@@ -646,7 +647,23 @@ std::wstring MainWidget::get_status_string() {
     if (SHOW_CLOSE_PORTAL_IN_STATUSBAR) {
         std::optional<Portal> close_portal = main_document_view->find_closest_portal(true);
         if (close_portal) {
-            status_string.replace("%{close_portal}", " [ PORTAL ]");
+            QString portal_str = " [ PORTAL";
+            if (main_document_view_has_document()) {
+                Document* doc = main_document_view->get_document();
+                if (close_portal->dst.document_checksum == doc->get_checksum()) {
+                    int dst_page = doc->absolute_to_page_pos({ 0, close_portal->dst.book_state.offset_y }).page + 1;
+                    portal_str += QString(" -> p.%1").arg(dst_page);
+                }
+                else {
+                    auto dst_path = checksummer->get_path(close_portal->dst.document_checksum);
+                    if (dst_path) {
+                        QFileInfo fi(QString::fromStdWString(dst_path.value()));
+                        portal_str += QString(" -> %1").arg(fi.fileName());
+                    }
+                }
+            }
+            portal_str += " ]";
+            status_string.replace("%{close_portal}", portal_str);
         }
     }
 
