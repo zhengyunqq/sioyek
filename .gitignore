@@ -370,3 +370,6 @@ tutorial/*.pdf
 tutorial/*.synctex.gz
 tutorial/*.bbl
 tutorial/*.blg
+sioyek.app/
+test_synctex/
+*_dual_panel*.pdf
