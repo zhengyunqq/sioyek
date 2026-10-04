@@ -3131,6 +3131,7 @@ void MainWidget::reload() {
     if (doc()) {
 		doc()->reload();
     }
+    validate_render();
 }
 
 
