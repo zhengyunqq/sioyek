@@ -14,7 +14,8 @@ import matplotlib.pyplot as plt
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QVBoxLayout,
     QPlainTextEdit, QLabel, QPushButton, QSpinBox,
-    QScrollArea, QWidget, QFrame, QSizePolicy
+    QScrollArea, QWidget, QFrame, QSizePolicy,
+    QSplitter, QCheckBox
 )
 from PyQt5.QtGui import (
     QFont, QPixmap, QImage, QPainter, QTextDocument,
@@ -204,28 +205,42 @@ class MarkdownPlainTextEdit(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+class PreviewScrollArea(QScrollArea):
+    """ScrollArea that notifies the dialog when its viewport is resized."""
+    def __init__(self, dialog, parent=None):
+        super().__init__(parent)
+        self.dialog = dialog
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.oldSize().isValid() and event.oldSize() != event.size():
+            self.dialog.on_preview_area_resized()
+
+
 class MarkdownEditorDialog(QDialog):
-    """Dialog for creating and editing Markdown notes with live preview."""
+    """Dialog for creating and editing Markdown notes with responsive live preview."""
     def __init__(self, initial_text="", is_edit=False, initial_width=260.0, page_num=1, parent=None):
         super().__init__(parent)
         self.is_edit = is_edit
         self.action = "cancel"
+        self.initial_width = float(initial_width)
 
         title = f"📝 编辑 Markdown 批注 (第 {page_num} 页)" if is_edit else f"📝 添加 Markdown 批注 (第 {page_num} 页)"
         self.setWindowTitle(title)
-        self.resize(760, 490)
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(12, 12, 12, 12)
         main_layout.setSpacing(10)
 
-        # Split content: Left Editor, Right Live Preview
-        split_layout = QHBoxLayout()
-        split_layout.setSpacing(12)
+        # QSplitter between Left Editor and Right Live Preview
+        self.splitter = QSplitter(Qt.Horizontal)
+        self.splitter.setChildrenCollapsible(False)
 
         # --- Left Panel: Editor ---
-        left_panel = QVBoxLayout()
+        left_widget = QWidget()
+        left_panel = QVBoxLayout(left_widget)
+        left_panel.setContentsMargins(0, 0, 0, 0)
         left_panel.setSpacing(6)
 
         lbl_edit_title = QLabel("<b>Markdown / LaTeX 编辑</b>")
@@ -251,29 +266,36 @@ class MarkdownEditorDialog(QDialog):
         lbl_w = QLabel("卡片宽度:")
         lbl_w.setStyleSheet("color: #444; font-size: 12px;")
         self.spin_width = QSpinBox()
-        self.spin_width.setRange(140, 600)
+        self.spin_width.setRange(120, 1200)
         self.spin_width.setSingleStep(20)
         self.spin_width.setSuffix(" pt")
         self.spin_width.setValue(int(initial_width))
-        self.spin_width.valueChanged.connect(self.schedule_preview)
+
+        self.chk_autofit = QCheckBox("自适应窗口")
+        self.chk_autofit.setToolTip("卡片宽度自动跟随右侧预览窗口大小变化；手动调整数值时自动取消勾选")
+        self.chk_autofit.setChecked(True)
+
         width_bar.addWidget(lbl_w)
         width_bar.addWidget(self.spin_width)
+        width_bar.addWidget(self.chk_autofit)
         width_bar.addStretch()
         left_panel.addLayout(width_bar)
 
-        split_layout.addLayout(left_panel, 3)
+        self.splitter.addWidget(left_widget)
 
         # --- Right Panel: Live Preview ---
-        right_panel = QVBoxLayout()
+        right_widget = QWidget()
+        right_panel = QVBoxLayout(right_widget)
+        right_panel.setContentsMargins(0, 0, 0, 0)
         right_panel.setSpacing(6)
 
         lbl_prev_title = QLabel("<b>卡片效果预览</b>")
-        lbl_prev_sub = QLabel("将直接作为 Stamp 独立批注内嵌至 PDF")
+        lbl_prev_sub = QLabel("将直接作为 Stamp 独立批注内嵌至 PDF（可拖动中间分割线改变宽度）")
         lbl_prev_sub.setStyleSheet("color: #656d76; font-size: 11px;")
         right_panel.addWidget(lbl_prev_title)
         right_panel.addWidget(lbl_prev_sub)
 
-        self.scroll_area = QScrollArea()
+        self.scroll_area = PreviewScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setStyleSheet("background-color: #eef0f3; border: 1px solid #d0d7de; border-radius: 4px;")
 
@@ -290,8 +312,13 @@ class MarkdownEditorDialog(QDialog):
         self.scroll_area.setWidget(self.preview_container)
         right_panel.addWidget(self.scroll_area)
 
-        split_layout.addLayout(right_panel, 3)
-        main_layout.addLayout(split_layout)
+        self.splitter.addWidget(right_widget)
+        main_layout.addWidget(self.splitter, 1)
+
+        # Initial layout sizes
+        right_init_w = max(280, int(initial_width + 30))
+        self.resize(380 + right_init_w + 30, 520)
+        self.splitter.setSizes([380, right_init_w])
 
         # --- Bottom Action Bar ---
         bottom_bar = QHBoxLayout()
@@ -361,15 +388,56 @@ class MarkdownEditorDialog(QDialog):
 
         main_layout.addLayout(bottom_bar)
 
-        # Debounced live preview timer
+        # Resizing debounce timer
+        self.resize_timer = QTimer(self)
+        self.resize_timer.setSingleShot(True)
+        self.resize_timer.setInterval(30)
+        self.resize_timer.timeout.connect(self.update_autofit_width)
+
+        self.spin_width.valueChanged.connect(self.on_spin_changed)
+        self.chk_autofit.toggled.connect(self.on_autofit_toggled)
+
+        # Debounced editor typing timer
         self.preview_timer = QTimer(self)
         self.preview_timer.setSingleShot(True)
-        self.preview_timer.setInterval(220)
+        self.preview_timer.setInterval(200)
         self.preview_timer.timeout.connect(self.update_preview)
         self.editor.textChanged.connect(self.schedule_preview)
 
         # Initial render
         self.update_preview()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if event.oldSize().isValid() and event.oldSize() != event.size():
+            self.on_preview_area_resized()
+
+    def on_preview_area_resized(self):
+        if self.chk_autofit.isChecked():
+            self.resize_timer.start(30)
+        else:
+            self.schedule_preview()
+
+    def update_autofit_width(self):
+        v_w = self.scroll_area.viewport().width()
+        new_w = max(140, int(v_w - 24))
+        if new_w != self.spin_width.value():
+            self.spin_width.blockSignals(True)
+            self.spin_width.setValue(new_w)
+            self.spin_width.blockSignals(False)
+            self.update_preview()
+
+    def on_spin_changed(self, val):
+        self.chk_autofit.blockSignals(True)
+        self.chk_autofit.setChecked(False)
+        self.chk_autofit.blockSignals(False)
+        self.schedule_preview()
+
+    def on_autofit_toggled(self, checked):
+        if checked:
+            self.update_autofit_width()
+        else:
+            self.schedule_preview()
 
     def schedule_preview(self):
         self.preview_timer.start()
@@ -385,6 +453,7 @@ class MarkdownEditorDialog(QDialog):
         preview_pix = pix.scaled(int(w), int(h), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.lbl_preview.setPixmap(preview_pix)
         self.lbl_preview.setFixedSize(preview_pix.size())
+        self.preview_container.adjustSize()
 
     def on_save(self):
         self.action = "save"
