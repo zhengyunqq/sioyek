@@ -208,7 +208,7 @@ void MainWidget::mouseMoveEvent(QMouseEvent* mouse_event) {
 
     NormalizedWindowPos normal_mpos = main_document_view->window_to_normalized_window_pos(mpos);
 
-    if (annot_drag_active) {
+    if (!rect_select_mode && annot_drag_active) {
         DocumentPos current_doc_pos = main_document_view->window_to_document_pos(mpos);
         if (current_doc_pos.page == annot_drag_page && doc()) {
             float dx = current_doc_pos.x - annot_drag_start_doc_pos.x;
@@ -304,7 +304,7 @@ void MainWidget::mouseMoveEvent(QMouseEvent* mouse_event) {
     }
     else {
         bool is_over_annot = false;
-        if (main_document_view && main_document_view_has_document()) {
+        if (!rect_select_mode && main_document_view && main_document_view_has_document()) {
             DocumentPos doc_pos = main_document_view->window_to_document_pos(mpos);
             if (doc_pos.page >= 0) {
                 auto hit = doc()->get_markdown_annotation_at(doc_pos.page, doc_pos.x, doc_pos.y);
@@ -1858,7 +1858,7 @@ void MainWidget::mousePressEvent(QMouseEvent* mevent) {
     bool is_alt_pressed = QGuiApplication::keyboardModifiers().testFlag(Qt::KeyboardModifier::AltModifier);
 
     if (mevent->button() == Qt::MouseButton::LeftButton) {
-        if (!is_rotated() && main_document_view_has_document()) {
+        if (!rect_select_mode && !is_rotated() && main_document_view_has_document()) {
             WindowPos mpos = { static_cast<float>(mevent->pos().x()), static_cast<float>(mevent->pos().y()) };
             DocumentPos doc_pos = main_document_view->window_to_document_pos(mpos);
             if (doc_pos.page >= 0) {
@@ -4489,6 +4489,10 @@ void MainWidget::handle_goto_markdown() {
 				fz_rect abs_rect = doc()->document_to_absolute_rect(annot->page, annot->rect, true);
 				opengl_widget->set_selected_rectangle(abs_rect);
 				validate_render();
+				QTimer::singleShot(1500, this, [this]() {
+					clear_selected_rect();
+					validate_render();
+				});
 			}
 		},
 		this,

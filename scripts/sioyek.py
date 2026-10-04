@@ -6,6 +6,14 @@ import fitz
 import regex
 import os
 
+def clean_path(path):
+    if not path:
+        return ""
+    path = str(path).strip()
+    if (path.startswith('"') and path.endswith('"')) or (path.startswith("'") and path.endswith("'")):
+        path = path[1:-1]
+    return path.strip()
+
 
 def merge_rects(rects):
     '''
