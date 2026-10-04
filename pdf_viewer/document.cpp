@@ -230,6 +230,11 @@ void Document::delete_closest_portal(float to_offset_y) {
 	}
 }
 
+void Document::delete_all_portals() {
+	db_manager->delete_all_links(get_checksum());
+	portals.clear();
+}
+
 const std::vector<BookMark>& Document::get_bookmarks() const {
 	return bookmarks;
 }

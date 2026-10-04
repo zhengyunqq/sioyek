@@ -177,6 +177,12 @@ void DocumentView::delete_closest_portal() {
 	}
 }
 
+void DocumentView::delete_all_portals() {
+	if (current_document) {
+		current_document->delete_all_portals();
+	}
+}
+
 void DocumentView::delete_closest_bookmark() {
 	if (current_document) {
 		delete_closest_bookmark_to_offset(offset_y);

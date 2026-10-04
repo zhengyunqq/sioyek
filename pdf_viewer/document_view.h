@@ -73,6 +73,7 @@ public:
 	std::optional<BookMark> find_closest_bookmark();
 	void goto_link(Portal* link);
 	void delete_closest_portal();
+	void delete_all_portals();
 	void delete_closest_bookmark();
 	Highlight get_highlight_with_index(int index);
 	void delete_highlight_with_index(int index);

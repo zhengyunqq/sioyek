@@ -603,6 +603,20 @@ class DeletePortalCommand : public Command {
 	}
 };
 
+class DeleteAllPortalsCommand : public Command {
+	void perform(MainWidget* widget) {
+		if (widget->main_document_view) {
+			widget->main_document_view->delete_all_portals();
+		}
+		widget->validate_render();
+		widget->validate_ui();
+	}
+
+	std::string get_name() {
+		return "delete_all_portals";
+	}
+};
+
 class DeleteBookmarkCommand : public Command {
 	void perform(MainWidget* widget) {
 		widget->main_document_view->delete_closest_bookmark();
@@ -2223,6 +2237,8 @@ CommandManager::CommandManager(ConfigManager* config_manager) {
 	new_commands["prev_state"] = []() {return std::make_unique< PrevStateCommand>(); };
 	new_commands["delete_link"] = []() {return std::make_unique< DeletePortalCommand>(); };
 	new_commands["delete_portal"] = []() {return std::make_unique< DeletePortalCommand>(); };
+	new_commands["delete_all_portals"] = []() {return std::make_unique< DeleteAllPortalsCommand>(); };
+	new_commands["clear_all_portals"] = []() {return std::make_unique< DeleteAllPortalsCommand>(); };
 	new_commands["delete_bookmark"] = []() {return std::make_unique< DeleteBookmarkCommand>(); };
 	new_commands["delete_highlight"] = []() {return std::make_unique< DeleteHighlightCommand>(); };
 	new_commands["goto_link"] = []() {return std::make_unique< GotoPortalCommand>(); };

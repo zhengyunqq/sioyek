@@ -556,6 +556,18 @@ bool DatabaseManager::delete_link(const std::string& src_document_path, float sr
 		error_message);
 }
 
+bool DatabaseManager::delete_all_links(const std::string& src_document_path) {
+
+	std::wstringstream ss;
+	ss << "DELETE FROM links where src_document='" << esc(src_document_path) << "';";
+	char* error_message = nullptr;
+
+	int error_code = sqlite3_exec(global_db, utf8_encode(ss.str()).c_str(), null_callback, 0, &error_message);
+	return handle_error(
+		error_code,
+		error_message);
+}
+
 bool DatabaseManager::delete_bookmark(const std::string& src_document_path, float src_offset_y) {
 
 	std::wstringstream ss;
