@@ -592,6 +592,7 @@ void Document::reload(std::string password) {
 	}
 	cached_page_links.clear();
 	cached_markdown_annots.clear();
+	cached_all_markdown_annots = std::nullopt;
 
 	delete cached_toc_model;
 	cached_toc_model = nullptr;
@@ -2354,6 +2355,7 @@ float Document::max_y_offset() {
 
 void Document::clear_markdown_annotations_cache() {
 	cached_markdown_annots.clear();
+	cached_all_markdown_annots = std::nullopt;
 }
 
 std::vector<fz_rect> Document::get_markdown_annotations_on_page(int page_idx) {
@@ -2423,4 +2425,88 @@ std::optional<std::pair<int, fz_rect>> Document::get_markdown_annotation_at(int 
 	}
 	return std::nullopt;
 }
+
+std::vector<MarkdownAnnotation> Document::get_all_markdown_annotations() {
+	if (cached_all_markdown_annots.has_value()) {
+		return cached_all_markdown_annots.value();
+	}
+
+	std::vector<MarkdownAnnotation> result;
+	if (!doc) {
+		return result;
+	}
+	pdf_document* pdf_doc = pdf_specifics(context, doc);
+	if (!pdf_doc) {
+		return result;
+	}
+
+	int n_pages = num_pages();
+	for (int pno = 0; pno < n_pages; pno++) {
+		fz_try(context) {
+			fz_page* fzpage = fz_load_page(context, doc, pno);
+			if (fzpage) {
+				fz_rect page_bound = fz_bound_page(context, fzpage);
+				pdf_page* ppage = pdf_page_from_fz_page(context, fzpage);
+				if (ppage) {
+					for (pdf_annot* annot = pdf_first_annot(context, ppage); annot; annot = pdf_next_annot(context, annot)) {
+						if (pdf_annot_type(context, annot) == PDF_ANNOT_STAMP) {
+							pdf_obj* subj_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "Subj");
+							if (subj_obj) {
+								const char* subj_str = pdf_to_text_string(context, subj_obj);
+								if (subj_str && strstr(subj_str, "sioyek_markdown") != nullptr) {
+									fz_rect bound = pdf_bound_annot(context, annot);
+									bound.x0 -= page_bound.x0;
+									bound.x1 -= page_bound.x0;
+									bound.y0 -= page_bound.y0;
+									bound.y1 -= page_bound.y0;
+
+									std::string mode = "card";
+									if (strstr(subj_str, "pill") != nullptr) {
+										mode = "pill";
+									}
+
+									std::wstring content_w = L"";
+									pdf_obj* contents_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "Contents");
+									if (contents_obj) {
+										const char* contents_str = pdf_to_text_string(context, contents_obj);
+										if (contents_str) {
+											content_w = utf8_decode(contents_str);
+										}
+									}
+
+									std::wstring title_w = L"";
+									pdf_obj* title_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "T");
+									if (title_obj) {
+										const char* title_str = pdf_to_text_string(context, title_obj);
+										if (title_str) {
+											title_w = utf8_decode(title_str);
+										}
+									}
+
+									float abs_y = document_to_absolute_y(pno, bound.y0);
+
+									MarkdownAnnotation item;
+									item.page = pno;
+									item.rect = bound;
+									item.abs_y = abs_y;
+									item.title = title_w;
+									item.content = content_w;
+									item.mode = mode;
+									result.push_back(item);
+								}
+							}
+						}
+					}
+				}
+				fz_drop_page(context, fzpage);
+			}
+		}
+		fz_catch(context) {
+		}
+	}
+
+	cached_all_markdown_annots = result;
+	return result;
+}
+
 

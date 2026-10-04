@@ -263,6 +263,20 @@ class GotoHighlightGlobalCommand : public Command {
 	bool requires_document() { return false; }
 };
 
+class GotoMarkdownCommand : public Command {
+	void perform(MainWidget* widget) {
+		widget->handle_goto_markdown();
+	}
+
+	bool pushes_state() {
+		return true;
+	}
+
+	std::string get_name() {
+		return "goto_markdown";
+	}
+};
+
 class GotoTableOfContentsCommand : public Command {
 
 	void perform(MainWidget* widget) {
@@ -2268,6 +2282,8 @@ CommandManager::CommandManager(ConfigManager* config_manager) {
 	new_commands["goto_bookmark"] = []() {return std::make_unique< GotoBookmarkCommand>(); };
 	new_commands["goto_bookmark_g"] = []() {return std::make_unique< GotoBookmarkGlobalCommand>(); };
 	new_commands["goto_highlight_g"] = []() {return std::make_unique< GotoHighlightGlobalCommand>(); };
+	new_commands["goto_markdown"] = []() {return std::make_unique< GotoMarkdownCommand>(); };
+	new_commands["search_markdown"] = []() {return std::make_unique< GotoMarkdownCommand>(); };
 	new_commands["link"] = []() {return std::make_unique< PortalCommand>(); };
 	new_commands["portal"] = []() {return std::make_unique< PortalCommand>(); };
 	new_commands["next_state"] = []() {return std::make_unique< NextStateCommand>(); };

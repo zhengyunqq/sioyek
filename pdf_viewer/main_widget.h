@@ -325,6 +325,8 @@ public:
 	void handle_add_highlight(char symbol);
 	void handle_goto_highlight();
 	void handle_goto_highlight_global();
+	void handle_goto_markdown();
+	void delete_markdown_annotation_at(int page, fz_rect rect);
 	void handle_goto_toc();
 	void handle_open_prev_doc();
 	void handle_move_screen(int amount);

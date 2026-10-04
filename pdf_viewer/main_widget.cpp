@@ -4381,6 +4381,126 @@ void MainWidget::handle_goto_highlight() {
 	current_widget->show();
 }
 
+void MainWidget::delete_markdown_annotation_at(int page, fz_rect rect) {
+	if (!main_document_view || !main_document_view_has_document()) {
+		return;
+	}
+	QString sioyek_path = QCoreApplication::applicationFilePath();
+	QString local_db = QString::fromStdWString(local_database_file_path.get_path());
+	QString shared_db = QString::fromStdWString(global_database_file_path.get_path());
+	QString file_path = QString::fromStdWString(main_document_view->get_document()->get_path());
+
+	QString rect_arg = QString("%1,%2,%3,%4,%5")
+		.arg(page)
+		.arg(rect.x0, 0, 'f', 2)
+		.arg(rect.y0, 0, 'f', 2)
+		.arg(rect.x1, 0, 'f', 2)
+		.arg(rect.y1, 0, 'f', 2);
+
+	QStringList args;
+	args << "-m" << "sioyek.delete_text"
+		 << sioyek_path
+		 << local_db
+		 << shared_db
+		 << file_path
+		 << rect_arg;
+
+	run_command(L"python", args, false);
+}
+
+void MainWidget::handle_goto_markdown() {
+	if (!main_document_view || !main_document_view_has_document()) {
+		return;
+	}
+
+	std::vector<std::wstring> option_names;
+	std::vector<std::wstring> option_location_strings;
+	std::vector<MarkdownAnnotation> markdown_annots = main_document_view->get_document()->get_all_markdown_annotations();
+
+	if (markdown_annots.empty()) {
+		set_status_message(L"当前文档暂无 Markdown 批注");
+		return;
+	}
+
+	int closest_index = 0;
+	float min_dist = 1e9f;
+	float current_y = main_document_view->get_offset_y();
+
+	for (size_t i = 0; i < markdown_annots.size(); i++) {
+		const auto& annot = markdown_annots[i];
+
+		std::wstring title = L"";
+		std::wstring clean_content = L"";
+
+		std::wstringstream ss(annot.content);
+		std::wstring line;
+		while (std::getline(ss, line)) {
+			size_t s = line.find_first_not_of(L" \t\r\n#*`>-");
+			if (s != std::wstring::npos) {
+				size_t e = line.find_last_not_of(L" \t\r\n*`");
+				std::wstring trimmed = line.substr(s, e - s + 1);
+				if (!trimmed.empty()) {
+					if (title.empty()) {
+						title = trimmed;
+					} else if (clean_content.empty() && trimmed != title) {
+						clean_content = trimmed;
+					}
+				}
+			}
+		}
+
+		if (title.empty()) {
+			title = (annot.mode == "pill") ? L"便签" : L"卡片";
+		}
+		if (title.length() > 35) {
+			title = title.substr(0, 34) + L"…";
+		}
+		if (clean_content.length() > 50) {
+			clean_content = clean_content.substr(0, 49) + L"…";
+		}
+
+		std::wstring prefix = (annot.mode == "pill") ? L"[便签] " : L"[卡片] ";
+		std::wstring display_name = ITEM_LIST_PREFIX + L" " + prefix + title;
+		if (!clean_content.empty()) {
+			display_name += L"  |  " + clean_content;
+		}
+
+		option_names.push_back(display_name);
+		option_location_strings.push_back(get_page_formatted_string(annot.page + 1));
+
+		float dist = std::abs(annot.abs_y - current_y);
+		if (dist < min_dist) {
+			min_dist = dist;
+			closest_index = static_cast<int>(i);
+		}
+	}
+
+	set_current_widget(new FilteredSelectTableWindowClass<MarkdownAnnotation>(
+		option_names,
+		option_location_strings,
+		markdown_annots,
+		closest_index,
+		[&](MarkdownAnnotation* annot) {
+			if (annot) {
+				validate_render();
+				push_state();
+				float target_y = std::max(0.0f, annot->abs_y - 40.0f);
+				main_document_view->set_offset_y(target_y);
+				fz_rect abs_rect = doc()->document_to_absolute_rect(annot->page, annot->rect, true);
+				opengl_widget->set_selected_rectangle(abs_rect);
+				validate_render();
+			}
+		},
+		this,
+		[&](MarkdownAnnotation* annot) {
+			if (annot) {
+				delete_markdown_annotation_at(annot->page, annot->rect);
+			}
+		}
+	));
+	current_widget->show();
+}
+
 void MainWidget::handle_goto_highlight_global() {
 	std::vector<std::pair<std::string, Highlight>> global_highlights;
 	db_manager->global_select_highlight(global_highlights);

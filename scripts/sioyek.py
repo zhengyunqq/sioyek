@@ -215,6 +215,10 @@ class Sioyek:
         data = None
         self.run_command("goto_bookmark_g", data, focus=focus)
 
+    def goto_markdown(self, focus=False):
+        data = None
+        self.run_command("goto_markdown", data, focus=focus)
+
     def goto_highlight_g(self, focus=False):
         data = None
         self.run_command("goto_highlight_g", data, focus=focus)

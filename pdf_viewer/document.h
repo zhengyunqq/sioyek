@@ -25,6 +25,15 @@
 #include "checksum.h"
 
 
+struct MarkdownAnnotation {
+	int page = -1;
+	fz_rect rect = {0, 0, 0, 0};
+	float abs_y = 0.0f;
+	std::wstring title;
+	std::wstring content;
+	std::string mode; // "pill" or "card"
+};
+
 class Document {
 
 private:
@@ -60,6 +69,7 @@ private:
 	std::wstring file_name;
 	std::unordered_map<int, fz_link*> cached_page_links;
 	std::unordered_map<int, std::vector<fz_rect>> cached_markdown_annots;
+	std::optional<std::vector<MarkdownAnnotation>> cached_all_markdown_annots;
 	std::unordered_map<int, std::vector<fz_rect>> cached_flat_words;
 	std::unordered_map<int, std::vector<std::vector<fz_rect>>> cached_flat_word_chars;
 	QStandardItemModel* cached_toc_model = nullptr;
@@ -248,6 +258,7 @@ public:
 
 	std::vector<fz_rect> get_markdown_annotations_on_page(int page_idx);
 	std::optional<std::pair<int, fz_rect>> get_markdown_annotation_at(int page_idx, float doc_x, float doc_y);
+	std::vector<MarkdownAnnotation> get_all_markdown_annotations();
 	void clear_markdown_annotations_cache();
 
 	friend class DocumentManager;
