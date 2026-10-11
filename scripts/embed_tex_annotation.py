@@ -209,7 +209,7 @@ def parse_rect_or_pos(s):
 
 
 # ---------------------------------------------------------------------------
-# Snippet Formatting & Probe Extraction
+# Snippet Formatting & Sliding-Window Candidate Probes
 # ---------------------------------------------------------------------------
 
 def format_hl_snippet(selected_text, max_len=45):
@@ -260,40 +260,80 @@ def normalize_probe_regex(word):
     return r'(?:``|"|“|‘|`)?' + w_escaped + r"(?:''|\"|”|’|')?"
 
 
-def extract_probes(selected_text):
-    r"""Extracts robust start and end probe words/chars from selected text."""
+def get_start_probe_candidates(selected_text):
+    r"""
+    Generates candidate start probe word sequences using a sliding window.
+    Resilient against spurious leading words (e.g. from section headers or run-in titles).
+    """
     text = selected_text.strip()
     has_cjk = bool(re.search(r'[\u4e00-\u9fa5]', text))
     if has_cjk:
         cjk_chars = re.findall(r'[\u4e00-\u9fa5]', text)
-        start_probe = ''.join(cjk_chars[:min(4, len(cjk_chars))])
-        end_probe = ''.join(cjk_chars[-min(4, len(cjk_chars)):])
-        return start_probe, end_probe, True
+        candidates = []
+        n = len(cjk_chars)
+        for i in range(min(5, max(1, n - 3))):
+            candidates.append(''.join(cjk_chars[i:i+4]))
+        for i in range(min(5, max(1, n - 2))):
+            candidates.append(''.join(cjk_chars[i:i+3]))
+        return candidates, True
 
     words = text.split()
-    start_words = []
+    clean_words = []
     for w in words:
         cw = re.sub(r'^[^\w]+|[^\w]+$', '', w)
-        if len(cw) >= 2 and re.search(r'[a-zA-Z0-9]', cw):
-            start_words.append(cw)
-        if len(start_words) >= 3:
+        if len(cw) >= 2 or cw in ('a', 'A', 'I'):
+            clean_words.append(cw)
+        if len(clean_words) >= 10:
             break
 
-    last_word_idx = -1
-    for i in range(len(words) - 1, -1, -1):
-        cw = re.sub(r'^[^\w]+|[^\w]+$', '', words[i])
-        if (len(cw) >= 2 or cw in ('a', 'A', 'I')) and re.match(r'^[a-zA-Z]+$', cw):
-            if not any(cw.lower().startswith(p) for p in ['tau', 'alpha', 'beta', 'gamma']):
-                last_word_idx = i
-                break
-    if last_word_idx == -1:
-        end_words = [re.sub(r'^[^\w]+|[^\w]+$', '', w) for w in words[-min(3, len(words)):]]
-    else:
-        start_idx = max(0, last_word_idx - 2)
-        end_words = [re.sub(r'^[^\w]+|[^\w]+$', '', w) for w in words[start_idx : last_word_idx + 1]]
-    end_words = [w for w in end_words if w]
+    candidates = []
+    # Try 3-word sliding windows (offset 0, 1, 2, 3...)
+    for i in range(min(6, max(1, len(clean_words) - 2))):
+        candidates.append(clean_words[i:i+3])
+    # Try 2-word sliding windows
+    for i in range(min(6, max(1, len(clean_words) - 1))):
+        candidates.append(clean_words[i:i+2])
+    return candidates, False
 
-    return start_words, end_words, False
+
+def get_end_probe_candidates(selected_text):
+    r"""
+    Generates candidate end probe word sequences using a sliding window from the end.
+    """
+    text = selected_text.strip()
+    has_cjk = bool(re.search(r'[\u4e00-\u9fa5]', text))
+    if has_cjk:
+        cjk_chars = re.findall(r'[\u4e00-\u9fa5]', text)
+        candidates = []
+        n = len(cjk_chars)
+        for i in range(n, max(0, n - 5), -1):
+            if i >= 4:
+                candidates.append(''.join(cjk_chars[i-4:i]))
+        for i in range(n, max(0, n - 5), -1):
+            if i >= 3:
+                candidates.append(''.join(cjk_chars[i-3:i]))
+        return candidates, True
+
+    words = text.split()
+    clean_words = []
+    for w in reversed(words):
+        cw = re.sub(r'^[^\w]+|[^\w]+$', '', w)
+        if len(cw) >= 2 or cw in ('a', 'A', 'I'):
+            clean_words.insert(0, cw)
+        if len(clean_words) >= 10:
+            break
+
+    candidates = []
+    n = len(clean_words)
+    # 3-word windows from the end
+    for i in range(n, max(0, n - 6), -1):
+        if i >= 3:
+            candidates.append(clean_words[i-3:i])
+    # 2-word windows from the end
+    for i in range(n, max(0, n - 6), -1):
+        if i >= 2:
+            candidates.append(clean_words[i-2:i])
+    return candidates, False
 
 
 def find_start_in_line(code, start_probe, is_cjk):
@@ -308,12 +348,6 @@ def find_start_in_line(code, start_probe, is_cjk):
         if code[:m.start()].endswith('\\'):
             return -1
         return m.start()
-    if len(start_probe) > 1:
-        parts = [normalize_probe_regex(w) for w in start_probe[:2]]
-        pat = r'\s+'.join(parts)
-        m = re.search(pat, code)
-        if m and not code[:m.start()].endswith('\\'):
-            return m.start()
     return -1
 
 
@@ -330,10 +364,6 @@ def find_end_in_line(code, end_probe, is_cjk, selected_text, start_offset=0):
         parts = [normalize_probe_regex(w) for w in end_probe]
         pat = r'\s+'.join(parts)
         matches = list(re.finditer(pat, sub_code))
-        if not matches and len(end_probe) > 1:
-            parts = [normalize_probe_regex(w) for w in end_probe[-2:]]
-            pat = r'\s+'.join(parts)
-            matches = list(re.finditer(pat, sub_code))
         if matches:
             m_end = matches[-1]
             abs_end = start_offset + m_end.end()
@@ -412,7 +442,7 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
     current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
     target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
 
-    # Search window around target_idx
+    # Search window around target_idx: [target_idx - 6, target_idx + 8]
     lo = max(0, target_idx - 6)
     hi = min(len(tf.lines), target_idx + 8)
     search_indices = [target_idx] + [i for i in range(lo, hi) if i != target_idx]
@@ -425,28 +455,49 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
     marked_success = False
     matched_idx = target_idx
 
-    # 1. Probe matching: insert start tag ▸ and end tag ◂ precisely
-    sp, ep, is_cjk = extract_probes(text)
-    if sp and ep:
-        # 1a. Same-line match
-        for idx in search_indices:
-            body, eol = strip_eol(tf.lines[idx])
-            code, comment = split_comment(body)
+    start_candidates, is_cjk = get_start_probe_candidates(text)
+    end_candidates, _ = get_end_probe_candidates(text)
+
+    # 1. Search for start probe and end probe
+    # 1a. Same line match
+    for idx in search_indices:
+        body, eol = strip_eol(tf.lines[idx])
+        code, comment = split_comment(body)
+        for sp in start_candidates:
             s_idx = find_start_in_line(code, sp, is_cjk)
             if s_idx >= 0:
-                e_idx = find_end_in_line(code, ep, is_cjk, text, start_offset=s_idx)
-                if e_idx > s_idx:
-                    new_code = code[:s_idx] + b_tag + code[s_idx:e_idx] + e_tag + code[e_idx:]
-                    sep = "" if not new_code or new_code.endswith(" ") else " "
-                    new_code = new_code + sep + m_tag
-                    sep_com = " " if comment and not new_code.endswith(" ") else ""
-                    tf.lines[idx] = new_code + sep_com + comment + eol
-                    matched_idx = idx
-                    marked_success = True
-                    break
+                for ep in end_candidates:
+                    e_idx = find_end_in_line(code, ep, is_cjk, text, start_offset=s_idx)
+                    if e_idx > s_idx:
+                        # Found start and end on the same line!
+                        # Check if e_idx is inside math mode ($...$)
+                        code_before_e = code[:e_idx]
+                        in_inline_math = (code_before_e.count('$') - code_before_e.count(r'\$')) % 2 != 0
+                        if in_inline_math:
+                            closing_dollar = code.find('$', e_idx)
+                            m_pos = closing_dollar + 1 if closing_dollar >= 0 else len(code)
+                        else:
+                            m_pos = e_idx
 
-        # 1b. Multi-line match: start on line A, end on line B (A < B)
-        if not marked_success:
+                        if m_pos == e_idx:
+                            new_code = code[:s_idx] + b_tag + code[s_idx:e_idx] + e_tag + " " + m_tag + code[e_idx:]
+                        else:
+                            new_code = (code[:s_idx] + b_tag + code[s_idx:e_idx] + e_tag +
+                                        code[e_idx:m_pos] + " " + m_tag + code[m_pos:])
+
+                        sep_com = " " if comment and not new_code.endswith(" ") else ""
+                        tf.lines[idx] = new_code + sep_com + comment + eol
+                        matched_idx = idx
+                        marked_success = True
+                        break
+                if marked_success:
+                    break
+        if marked_success:
+            break
+
+    # 1b. Multi-line match: start on line found_a, end on line found_b (found_a < found_b)
+    if not marked_success:
+        for sp in start_candidates:
             found_a = -1
             s_pos = -1
             for idx in range(lo, hi):
@@ -459,44 +510,59 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
                     break
 
             if found_a >= 0:
-                found_b = -1
-                e_pos = -1
-                for idx in range(found_a + 1, hi):
-                    body, _ = strip_eol(tf.lines[idx])
-                    code, _ = split_comment(body)
-                    e = find_end_in_line(code, ep, is_cjk, text, start_offset=0)
-                    if e >= 0:
-                        found_b = idx
-                        e_pos = e
+                for ep in end_candidates:
+                    found_b = -1
+                    e_pos = -1
+                    for idx in range(found_a + 1, hi):
+                        body, _ = strip_eol(tf.lines[idx])
+                        code, _ = split_comment(body)
+                        e = find_end_in_line(code, ep, is_cjk, text, start_offset=0)
+                        if e >= 0:
+                            found_b = idx
+                            e_pos = e
+                            break
+
+                    if found_b >= 0:
+                        # Insert b_tag on line A
+                        body_a, eol_a = strip_eol(tf.lines[found_a])
+                        code_a, com_a = split_comment(body_a)
+                        new_code_a = code_a[:s_pos] + b_tag + code_a[s_pos:]
+                        sep_com_a = " " if com_a and not new_code_a.endswith(" ") else ""
+                        tf.lines[found_a] = new_code_a + sep_com_a + com_a + eol_a
+
+                        # Insert e_tag on line B + margin note
+                        body_b, eol_b = strip_eol(tf.lines[found_b])
+                        code_b, com_b = split_comment(body_b)
+                        code_before_e = code_b[:e_pos]
+                        in_inline_math = (code_before_e.count('$') - code_before_e.count(r'\$')) % 2 != 0
+                        if in_inline_math:
+                            closing_dollar = code_b.find('$', e_pos)
+                            m_pos = closing_dollar + 1 if closing_dollar >= 0 else len(code_b)
+                        else:
+                            m_pos = e_pos
+
+                        if m_pos == e_pos:
+                            new_code_b = code_b[:e_pos] + e_tag + " " + m_tag + code_b[e_pos:]
+                        else:
+                            new_code_b = (code_b[:e_pos] + e_tag + code_b[e_pos:m_pos] +
+                                          " " + m_tag + code_b[m_pos:])
+                        sep_com_b = " " if com_b and not new_code_b.endswith(" ") else ""
+                        tf.lines[found_b] = new_code_b + sep_com_b + com_b + eol_b
+
+                        matched_idx = found_a
+                        marked_success = True
                         break
+            if marked_success:
+                break
 
-                if found_b >= 0:
-                    # Insert start tag on line A
-                    body_a, eol_a = strip_eol(tf.lines[found_a])
-                    code_a, com_a = split_comment(body_a)
-                    new_code_a = code_a[:s_pos] + b_tag + code_a[s_pos:]
-                    sep_com_a = " " if com_a and not new_code_a.endswith(" ") else ""
-                    tf.lines[found_a] = new_code_a + sep_com_a + com_a + eol_a
-
-                    # Insert end tag on line B + margin note
-                    body_b, eol_b = strip_eol(tf.lines[found_b])
-                    code_b, com_b = split_comment(body_b)
-                    new_code_b = code_b[:e_pos] + e_tag + code_b[e_pos:]
-                    sep = "" if not new_code_b or new_code_b.endswith(" ") else " "
-                    new_code_b = new_code_b + sep + m_tag
-                    sep_com_b = " " if com_b and not new_code_b.endswith(" ") else ""
-                    tf.lines[found_b] = new_code_b + sep_com_b + com_b + eol_b
-
-                    matched_idx = found_a
-                    marked_success = True
-
-    # 2. Fallback: append marks to safe line if probe matching could not locate boundaries
+    # 2. Fallback: only if probe matching completely failed, insert ONLY m_tag on safe line!
+    # DO NOT dump dummy \sioyekhlbegin\sioyekhlend (▸◂) together at the end of the line!
     if not marked_success:
         safe_idx, _ = find_insert_line(tf.lines, target_idx)
         body, eol = strip_eol(tf.lines[safe_idx])
         code, comment = split_comment(body)
         sep = "" if not code or code.endswith(" ") else " "
-        new_code = code + sep + b_tag + e_tag + " " + m_tag
+        new_code = code + sep + m_tag
         sep_com = " " if comment and not new_code.endswith(" ") else ""
         tf.lines[safe_idx] = new_code + sep_com + comment + eol
         matched_idx = safe_idx
@@ -511,7 +577,7 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
             if inject_hl_definition(root_tf):
                 files_to_commit.append(root_tf)
 
-    desc = f"高亮与页边标记 [{type_char}] @ {os.path.basename(tex_path)}:{matched_idx + 1}: {snippet[:30]}"
+    desc = f"高亮标记 [{type_char}] @ {os.path.basename(tex_path)}:{matched_idx + 1}: {snippet[:30]}"
     commit_annot_files(files_to_commit, pdf_path, "highlight", desc)
     return f"已标记高亮与页边注 [{type_char}]：{os.path.basename(tex_path)}:{matched_idx + 1}（等待编译）"
 
