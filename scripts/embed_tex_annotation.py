@@ -271,10 +271,13 @@ def get_start_probe_candidates(selected_text):
         cjk_chars = re.findall(r'[\u4e00-\u9fa5]', text)
         candidates = []
         n = len(cjk_chars)
-        for i in range(min(5, max(1, n - 3))):
-            candidates.append(''.join(cjk_chars[i:i+4]))
-        for i in range(min(5, max(1, n - 2))):
-            candidates.append(''.join(cjk_chars[i:i+3]))
+        if n <= 3:
+            candidates.append(''.join(cjk_chars))
+        else:
+            for i in range(min(5, max(1, n - 3))):
+                candidates.append(''.join(cjk_chars[i:i+4]))
+            for i in range(min(5, max(1, n - 2))):
+                candidates.append(''.join(cjk_chars[i:i+3]))
         return candidates, True
 
     words = text.split()
@@ -287,12 +290,22 @@ def get_start_probe_candidates(selected_text):
             break
 
     candidates = []
-    # Try 3-word sliding windows (offset 0, 1, 2, 3...)
-    for i in range(min(6, max(1, len(clean_words) - 2))):
-        candidates.append(clean_words[i:i+3])
-    # Try 2-word sliding windows
-    for i in range(min(6, max(1, len(clean_words) - 1))):
-        candidates.append(clean_words[i:i+2])
+    n = len(clean_words)
+    if n == 0:
+        return [], False
+    elif n == 1:
+        candidates.append([clean_words[0]])
+    elif n == 2:
+        candidates.append([clean_words[0], clean_words[1]])
+        candidates.append([clean_words[0]])
+        candidates.append([clean_words[1]])
+    else:
+        # Try 3-word sliding windows (offset 0, 1, 2, 3...)
+        for i in range(min(6, max(1, n - 2))):
+            candidates.append(clean_words[i:i+3])
+        # Try 2-word sliding windows
+        for i in range(min(6, max(1, n - 1))):
+            candidates.append(clean_words[i:i+2])
     return candidates, False
 
 
@@ -306,12 +319,15 @@ def get_end_probe_candidates(selected_text):
         cjk_chars = re.findall(r'[\u4e00-\u9fa5]', text)
         candidates = []
         n = len(cjk_chars)
-        for i in range(n, max(0, n - 5), -1):
-            if i >= 4:
-                candidates.append(''.join(cjk_chars[i-4:i]))
-        for i in range(n, max(0, n - 5), -1):
-            if i >= 3:
-                candidates.append(''.join(cjk_chars[i-3:i]))
+        if n <= 3:
+            candidates.append(''.join(cjk_chars))
+        else:
+            for i in range(n, max(0, n - 5), -1):
+                if i >= 4:
+                    candidates.append(''.join(cjk_chars[i-4:i]))
+            for i in range(n, max(0, n - 5), -1):
+                if i >= 3:
+                    candidates.append(''.join(cjk_chars[i-3:i]))
         return candidates, True
 
     words = text.split()
@@ -325,14 +341,23 @@ def get_end_probe_candidates(selected_text):
 
     candidates = []
     n = len(clean_words)
-    # 3-word windows from the end
-    for i in range(n, max(0, n - 6), -1):
-        if i >= 3:
-            candidates.append(clean_words[i-3:i])
-    # 2-word windows from the end
-    for i in range(n, max(0, n - 6), -1):
-        if i >= 2:
-            candidates.append(clean_words[i-2:i])
+    if n == 0:
+        return [], False
+    elif n == 1:
+        candidates.append([clean_words[0]])
+    elif n == 2:
+        candidates.append([clean_words[0], clean_words[1]])
+        candidates.append([clean_words[1]])
+        candidates.append([clean_words[0]])
+    else:
+        # 3-word windows from the end
+        for i in range(n, max(0, n - 6), -1):
+            if i >= 3:
+                candidates.append(clean_words[i-3:i])
+        # 2-word windows from the end
+        for i in range(n, max(0, n - 6), -1):
+            if i >= 2:
+                candidates.append(clean_words[i-2:i])
     return candidates, False
 
 
@@ -342,7 +367,7 @@ def find_start_in_line(code, start_probe, is_cjk):
         m = re.search(re.escape(start_probe), code)
         return m.start() if m else -1
     parts = [normalize_probe_regex(w) for w in start_probe]
-    pat = r'\s+'.join(parts)
+    pat = r'[,\.;:!?~—–-]*\s+'.join(parts)
     m = re.search(pat, code)
     if m:
         if code[:m.start()].endswith('\\'):
@@ -351,38 +376,42 @@ def find_start_in_line(code, start_probe, is_cjk):
     return -1
 
 
-def find_end_in_line(code, end_probe, is_cjk, selected_text, start_offset=0):
-    r"""Returns the end character index of end_probe in code, or -1."""
+def find_end_in_line(code, end_probe, is_cjk, selected_text, start_offset=0, expected_len=None):
+    r"""Returns the end character index of end_probe in code, or -1.
+    Uses expected_len to disambiguate multiple occurrences of end_probe."""
     sub_code = code[start_offset:]
     abs_end = -1
+    target_len = expected_len if expected_len is not None else len(selected_text)
     if is_cjk:
         matches = list(re.finditer(re.escape(end_probe), sub_code))
         if matches:
-            m_end = matches[-1]
-            abs_end = start_offset + m_end.end()
+            best_m = min(matches, key=lambda m: abs(m.end() - target_len))
+            abs_end = start_offset + best_m.end()
     else:
         parts = [normalize_probe_regex(w) for w in end_probe]
-        pat = r'\s+'.join(parts)
+        pat = r'[,\.;:!?~—–-]*\s+'.join(parts)
         matches = list(re.finditer(pat, sub_code))
         if matches:
-            m_end = matches[-1]
-            abs_end = start_offset + m_end.end()
+            best_m = min(matches, key=lambda m: abs(m.end() - target_len))
+            abs_end = start_offset + best_m.end()
             last_word = end_probe[-1]
             idx_in_pdf = selected_text.rfind(last_word)
             pdf_tail = selected_text[idx_in_pdf + len(last_word):].strip() if idx_in_pdf >= 0 else ''
             tail_code = code[abs_end:]
             if pdf_tail:
-                last_char = pdf_tail[-1]
-                if last_char in '.!?,;:)]}"\'':
-                    p_idx = tail_code.find(last_char)
-                    if p_idx >= 0:
-                        abs_end += p_idx + 1
-                elif '$' in tail_code:
-                    first_dollar = tail_code.find('$')
-                    if first_dollar >= 0:
-                        second_dollar = tail_code.find('$', first_dollar + 1)
-                        if second_dollar >= 0:
-                            abs_end += second_dollar + 1
+                # Check if an inline math formula $...$ immediately follows the matched probe
+                m_math = re.match(r'^\s*\$([^$]+)\$', tail_code)
+                if m_math:
+                    abs_end += m_math.end()
+                    after_math = code[abs_end:]
+                    if pdf_tail[-1] in '.!?,;:)]}"\'' and after_math and after_math[0] == pdf_tail[-1]:
+                        abs_end += 1
+                else:
+                    last_char = pdf_tail[-1]
+                    if last_char in '.!?,;:)]}"\'':
+                        p_idx = tail_code.find(last_char)
+                        if p_idx >= 0 and not any(c.isalnum() for c in tail_code[:p_idx]):
+                            abs_end += p_idx + 1
     return abs_end
 
 
@@ -510,17 +539,24 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
                     break
 
             if found_a >= 0:
+                body_a_raw, _ = strip_eol(tf.lines[found_a])
+                code_a_raw, _ = split_comment(body_a_raw)
+                chars_on_a = len(code_a_raw) - s_pos
+
                 for ep in end_candidates:
                     found_b = -1
                     e_pos = -1
+                    interm_chars = 0
                     for idx in range(found_a + 1, hi):
                         body, _ = strip_eol(tf.lines[idx])
                         code, _ = split_comment(body)
-                        e = find_end_in_line(code, ep, is_cjk, text, start_offset=0)
+                        exp_len_b = max(1, len(text) - (chars_on_a + interm_chars))
+                        e = find_end_in_line(code, ep, is_cjk, text, start_offset=0, expected_len=exp_len_b)
                         if e >= 0:
                             found_b = idx
                             e_pos = e
                             break
+                        interm_chars += len(code)
 
                     if found_b >= 0:
                         # Insert b_tag on line A
@@ -600,37 +636,81 @@ def delete_highlight(pdf_path, rect_str, type_char, selected_text):
     snippet = format_hl_snippet(selected_text) if selected_text else ""
     probe_words = [w for w in re.findall(r"\w+", selected_text.lower()) if len(w) >= 3] if selected_text else []
 
+    deleted_type = type_char
     matched_idx = -1
     modified = False
 
     # 1. Remove \sioyekhlmark matching snippet/type
+    best_mark = None
+    best_score = 0.0
+    best_line_idx = -1
+
     for idx in search_indices:
         line = tf.lines[idx]
         marks = find_all_sioyekhlmarks_in_line(line)
         for s, e, opt, body in marks:
             body_lower = body.lower()
-            text_match = (snippet and snippet in body) or (probe_words and any(pw in body_lower for pw in probe_words))
-            type_match = (not type_char or opt == type_char)
-            if text_match or type_match:
-                while s > 0 and line[s - 1] in (" ", "\t"):
-                    s -= 1
-                tf.lines[idx] = line[:s] + line[e:]
-                matched_idx = idx
-                modified = True
-                break
-        if modified:
-            break
+            text_match = bool((snippet and snippet in body) or (probe_words and any(pw in body_lower for pw in probe_words)))
+            type_match = bool(type_char and opt == type_char)
+            if text_match and type_match:
+                score = 3.0
+            elif text_match:
+                score = 2.0
+            elif type_match:
+                score = 1.0
+            else:
+                score = 0.0
+
+            if score > 0 and idx == target_idx:
+                score += 0.5
+
+            if score > best_score:
+                best_score = score
+                best_mark = (s, e, opt, body)
+                best_line_idx = idx
+
+    if best_mark is not None:
+        s, e, opt, body = best_mark
+        deleted_type = opt
+        line = tf.lines[best_line_idx]
+        while s > 0 and line[s - 1] in (" ", "\t"):
+            s -= 1
+        tf.lines[best_line_idx] = line[:s] + line[e:]
+        matched_idx = best_line_idx
+        modified = True
 
     # 2. Remove \sioyekhlbegin and \sioyekhlend tags
-    for idx in search_indices:
+    target_type = deleted_type or type_char
+    pat_begin_typed = re.compile(r"\\sioyekhlbegin\[" + re.escape(target_type) + r"\]") if target_type else None
+    pat_end_typed = re.compile(r"\\sioyekhlend\[" + re.escape(target_type) + r"\]") if target_type else None
+
+    pat_begin_gen = re.compile(r"\\sioyekhlbegin(?:\[[^\]]*\])?")
+    pat_end_gen = re.compile(r"\\sioyekhlend(?:\[[^\]]*\])?")
+
+    has_typed_begin = bool(pat_begin_typed and any(pat_begin_typed.search(tf.lines[i]) for i in range(lo, hi)))
+    has_typed_end = bool(pat_end_typed and any(pat_end_typed.search(tf.lines[i]) for i in range(lo, hi)))
+
+    pat_b = pat_begin_typed if has_typed_begin else pat_begin_gen
+    pat_e = pat_end_typed if has_typed_end else pat_end_gen
+
+    b_removed = False
+    e_removed = False
+
+    for idx in range(lo, hi):
         line = tf.lines[idx]
-        if r"\sioyekhlbegin" in line or r"\sioyekhlend" in line:
-            new_line = re.sub(r"\\sioyekhlbegin(?:\[[^\]]*\])?", "", line)
-            new_line = re.sub(r"\\sioyekhlend(?:\[[^\]]*\])?", "", new_line)
-            if new_line != line:
-                tf.lines[idx] = new_line
-                matched_idx = idx
-                modified = True
+        new_line = line
+        if not b_removed and pat_b.search(new_line):
+            new_line = pat_b.sub("", new_line, count=1)
+            b_removed = True
+        if not e_removed and pat_e.search(new_line):
+            new_line = pat_e.sub("", new_line, count=1)
+            e_removed = True
+        if new_line != line:
+            tf.lines[idx] = new_line
+            matched_idx = idx
+            modified = True
+        if b_removed and e_removed:
+            break
 
     if modified:
         desc = f"删除高亮标记 @ {os.path.basename(tex_path)}:{matched_idx + 1}"
