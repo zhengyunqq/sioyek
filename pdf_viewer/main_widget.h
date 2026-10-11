@@ -226,9 +226,7 @@ public:
 	Document* doc();
 
 	void trigger_embed_highlight_in_tex(char symbol);
-	void trigger_embed_bookmark_in_tex(const std::wstring& title);
 	void trigger_delete_highlight_in_tex(const Highlight& hl);
-	void trigger_delete_closest_bookmark_in_tex();
 
 	MainWidget(
 		fz_context* mupdf_context,

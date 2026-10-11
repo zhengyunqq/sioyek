@@ -192,7 +192,6 @@ class RegexSearchCommand : public TextCommand {
 
 class AddBookmarkCommand : public TextCommand {
 	void perform(MainWidget* widget) {
-		widget->trigger_embed_bookmark_in_tex(text.value());
 		widget->main_document_view->add_bookmark(text.value());
 	}
 
@@ -660,7 +659,6 @@ class DeleteAllPortalsCommand : public Command {
 
 class DeleteBookmarkCommand : public Command {
 	void perform(MainWidget* widget) {
-		widget->trigger_delete_closest_bookmark_in_tex();
 		widget->main_document_view->delete_closest_bookmark();
 		widget->validate_render();
 	}

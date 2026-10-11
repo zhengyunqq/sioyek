@@ -1,13 +1,11 @@
 """
-Automatically embed highlights and bookmarks directly into LaTeX source files
+Automatically embed highlights directly into LaTeX source files
 for SyncTeX-enabled PDF documents.
 
 Commands supported:
     python -m sioyek.embed_tex_annotation highlight SIOYEK LOCAL_DB SHARED_DB PDF RECT TYPE TEXT
-    python -m sioyek.embed_tex_annotation bookmark SIOYEK LOCAL_DB SHARED_DB PDF POS TITLE
     python -m sioyek.embed_tex_annotation delete_highlight SIOYEK LOCAL_DB SHARED_DB PDF RECT TYPE TEXT
-    python -m sioyek.embed_tex_annotation delete_bookmark SIOYEK LOCAL_DB SHARED_DB PDF POS TITLE
-    python -m sioyek.embed_tex_annotation undo SIOYEK LOCAL_DB SHARED_DB PDF [highlight|bookmark]
+    python -m sioyek.embed_tex_annotation undo SIOYEK LOCAL_DB SHARED_DB PDF [highlight]
 """
 
 import sys
@@ -90,18 +88,6 @@ HL_DEFINITION_LINES = [
     r"}",
     r"\makeatother",
     MARKER_HL_END,
-]
-
-MARKER_BM_BEGIN = "%% >>> sioyek bookmarks >>>"
-MARKER_BM_END = "%% <<< sioyek bookmarks <<<"
-BM_DEFINITION_LINES = [
-    MARKER_BM_BEGIN,
-    r"\makeatletter",
-    r"\@ifpackageloaded{hyperref}{}{%",
-    r"  \providecommand{\pdfbookmark}[3][]{}%",
-    r"}",
-    r"\makeatother",
-    MARKER_BM_END,
 ]
 
 
@@ -198,22 +184,6 @@ def inject_hl_definition(tf):
     if begin > 0 and not tf.lines[begin - 1].endswith(("\n", "\r")):
         tf.lines[begin - 1] += nl
     block = [l + nl for l in HL_DEFINITION_LINES]
-    tf.lines[begin:begin] = block
-    return True
-
-
-def inject_bm_definition(tf):
-    for line in tf.lines:
-        code, _ = split_comment(strip_eol(line)[0])
-        if MARKER_BM_BEGIN in line or MARKER_BM_BEGIN in code:
-            return False
-    begin, _ = find_document_bounds(tf.lines)
-    if begin is None:
-        return False
-    nl = tf.newline
-    if begin > 0 and not tf.lines[begin - 1].endswith(("\n", "\r")):
-        tf.lines[begin - 1] += nl
-    block = [l + nl for l in BM_DEFINITION_LINES]
     tf.lines[begin:begin] = block
     return True
 
@@ -437,51 +407,6 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
 
 
 # ---------------------------------------------------------------------------
-# Bookmark Logic
-# ---------------------------------------------------------------------------
-
-def embed_bookmark(pdf_path, pos_str, title):
-    if not has_synctex_data(pdf_path):
-        log(f"embed_bookmark: no synctex data for {pdf_path}, skipping")
-        return None
-
-    page, rect = parse_rect_or_pos(pos_str)
-    clean_t = title.strip()
-    if not clean_t:
-        return None
-
-    tex_path, synctex_line = resolve_source(pdf_path, page, rect)
-    tf = TexFile(tex_path)
-    current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
-    target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
-
-    safe_idx, _ = find_insert_line(tf.lines, target_idx)
-
-    # Unique anchor slug
-    slug = re.sub(r"[^a-zA-Z0-9_\u4e00-\u9fa5]+", "_", clean_t)[:20]
-    hash_tag = hashlib.md5((clean_t + str(safe_idx)).encode()).hexdigest()[:6]
-    bm_id = f"bm_{slug}_{hash_tag}"
-
-    bm_macro = f"\\pdfbookmark[2]{{{clean_t}}}{{{bm_id}}}" + tf.newline
-    # Insert right before safe_idx
-    tf.lines.insert(safe_idx, bm_macro)
-
-    files_to_commit = [tf]
-    root_path = find_root_file(tex_path, pdf_path)
-    if root_path:
-        if os.path.normpath(root_path) == os.path.normpath(tex_path):
-            inject_bm_definition(tf)
-        else:
-            root_tf = TexFile(root_path)
-            if inject_bm_definition(root_tf):
-                files_to_commit.append(root_tf)
-
-    desc = f"书签「{clean_t}」@ {os.path.basename(tex_path)}:{safe_idx + 1}"
-    commit_annot_files(files_to_commit, pdf_path, "bookmark", desc)
-    return f"已嵌入书签「{clean_t}」：{os.path.basename(tex_path)}:{safe_idx + 1}（等待编译）"
-
-
-# ---------------------------------------------------------------------------
 # Deletion & Undo
 # ---------------------------------------------------------------------------
 
@@ -547,35 +472,6 @@ def delete_highlight(pdf_path, rect_str, type_char, selected_text):
     return None
 
 
-def delete_bookmark(pdf_path, pos_str, title):
-    if not has_synctex_data(pdf_path):
-        return None
-
-    page, rect = parse_rect_or_pos(pos_str)
-    clean_t = title.strip()
-    tex_path, synctex_line = resolve_source(pdf_path, page, rect)
-    tf = TexFile(tex_path)
-    current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
-    target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
-
-    lo = max(0, target_idx - 5)
-    hi = min(len(tf.lines), target_idx + 6)
-    del_idx = -1
-
-    for idx in range(lo, hi):
-        line = tf.lines[idx]
-        if r"\pdfbookmark" in line and clean_t in line:
-            del_idx = idx
-            break
-
-    if del_idx >= 0:
-        del tf.lines[del_idx]
-        desc = f"删除书签「{clean_t}」@ {os.path.basename(tex_path)}:{del_idx + 1}"
-        commit_annot_files([tf], pdf_path, "bookmark", desc)
-        return f"已从 {os.path.basename(tex_path)} 移除书签「{clean_t}」（等待编译）"
-    return None
-
-
 def undo_annotation(pdf_path, target_kind=None):
     hist = load_annot_history()
     idx = None
@@ -587,7 +483,7 @@ def undo_annotation(pdf_path, target_kind=None):
                 break
 
     if idx is None:
-        target_name = "高亮/书签" if target_kind is None else ("高亮" if target_kind == "highlight" else "书签")
+        target_name = "高亮" if target_kind == "highlight" else "标注"
         return f"没有可撤销的 {target_name} 写入"
 
     entry = hist[idx]
@@ -640,21 +536,11 @@ def main():
             selected_text = sys.argv[8]
             msg = embed_highlight(pdf_path, rect_str, type_char, selected_text)
 
-        elif action == "bookmark" and len(sys.argv) >= 8:
-            pos_str = clean_path(sys.argv[6])
-            title = sys.argv[7]
-            msg = embed_bookmark(pdf_path, pos_str, title)
-
         elif action == "delete_highlight" and len(sys.argv) >= 9:
             rect_str = clean_path(sys.argv[6])
             type_char = clean_path(sys.argv[7]) or "a"
             selected_text = sys.argv[8]
             msg = delete_highlight(pdf_path, rect_str, type_char, selected_text)
-
-        elif action == "delete_bookmark" and len(sys.argv) >= 8:
-            pos_str = clean_path(sys.argv[6])
-            title = sys.argv[7]
-            msg = delete_bookmark(pdf_path, pos_str, title)
 
         elif action == "undo":
             target_kind = clean_path(sys.argv[6]) if len(sys.argv) > 6 else None

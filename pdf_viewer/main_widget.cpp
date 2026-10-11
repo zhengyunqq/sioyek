@@ -4475,46 +4475,6 @@ void MainWidget::trigger_embed_highlight_in_tex(char symbol) {
 	run_command(L"python", args, false);
 }
 
-void MainWidget::trigger_embed_bookmark_in_tex(const std::wstring& title) {
-	if (!main_document_view || !doc() || title.empty()) {
-		return;
-	}
-	std::wstring docpath = doc()->get_path();
-	if (docpath.empty()) {
-		return;
-	}
-	QString qdocpath = QString::fromStdWString(docpath);
-	QString synctex_gz = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex.gz";
-	QString synctex_plain = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex";
-	if (!QFile::exists(synctex_gz) && !QFile::exists(synctex_plain)) {
-		return;
-	}
-
-	float offset_y = main_document_view->get_offset_y();
-	DocumentPos pos = doc()->absolute_to_page_pos({ 0, offset_y });
-	float page_w = doc()->get_page_width(pos.page);
-	float x = page_w * 0.5f;
-	float y = pos.y;
-
-	QString sioyek_path = QCoreApplication::applicationFilePath();
-	QString local_db = QString::fromStdWString(local_database_file_path.get_path());
-	QString shared_db = QString::fromStdWString(global_database_file_path.get_path());
-	QString pos_str = QString("%1,%2,%3").arg(pos.page).arg(x, 0, 'f', 2).arg(y, 0, 'f', 2);
-	QString title_str = QString::fromStdWString(title);
-
-	QStringList args;
-	args << "-m" << "sioyek.embed_tex_annotation"
-	     << "bookmark"
-	     << sioyek_path
-	     << local_db
-	     << shared_db
-	     << qdocpath
-	     << pos_str
-	     << title_str;
-
-	run_command(L"python", args, false);
-}
-
 void MainWidget::trigger_delete_highlight_in_tex(const Highlight& hl) {
 	if (!main_document_view || !doc()) {
 		return;
@@ -4555,52 +4515,6 @@ void MainWidget::trigger_delete_highlight_in_tex(const Highlight& hl) {
 	     << rect_str
 	     << sym_str
 	     << text_str;
-
-	run_command(L"python", args, false);
-}
-
-void MainWidget::trigger_delete_closest_bookmark_in_tex() {
-	if (!main_document_view || !doc()) {
-		return;
-	}
-	std::wstring docpath = doc()->get_path();
-	if (docpath.empty()) {
-		return;
-	}
-	QString qdocpath = QString::fromStdWString(docpath);
-	QString synctex_gz = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex.gz";
-	QString synctex_plain = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex";
-	if (!QFile::exists(synctex_gz) && !QFile::exists(synctex_plain)) {
-		return;
-	}
-
-	const auto& bms = doc()->get_bookmarks();
-	if (bms.empty()) return;
-	float offset_y = main_document_view->get_offset_y();
-	int closest_idx = doc()->find_closest_bookmark_index(bms, offset_y);
-	if (closest_idx < 0 || closest_idx >= (int)bms.size()) return;
-
-	const auto& bm = bms[closest_idx];
-	DocumentPos pos = doc()->absolute_to_page_pos({ 0, bm.y_offset });
-	float page_w = doc()->get_page_width(pos.page);
-	float x = page_w * 0.5f;
-	float y = pos.y;
-
-	QString sioyek_path = QCoreApplication::applicationFilePath();
-	QString local_db = QString::fromStdWString(local_database_file_path.get_path());
-	QString shared_db = QString::fromStdWString(global_database_file_path.get_path());
-	QString pos_str = QString("%1,%2,%3").arg(pos.page).arg(x, 0, 'f', 2).arg(y, 0, 'f', 2);
-	QString title_str = QString::fromStdWString(bm.description);
-
-	QStringList args;
-	args << "-m" << "sioyek.embed_tex_annotation"
-	     << "delete_bookmark"
-	     << sioyek_path
-	     << local_db
-	     << shared_db
-	     << qdocpath
-	     << pos_str
-	     << title_str;
 
 	run_command(L"python", args, false);
 }
