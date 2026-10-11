@@ -4333,14 +4333,17 @@ void MainWidget::handle_goto_bookmark_global() {
 
 void MainWidget::handle_add_highlight(char symbol) {
 	if (main_document_view->selected_character_rects.size() > 0) {
+		trigger_embed_highlight_in_tex(symbol);
 		main_document_view->add_highlight(selection_begin, selection_end, symbol);
 		main_document_view->selected_character_rects.clear();
 		selected_text.clear();
 	}
 	else if (selected_highlight_index != -1) {
 		Highlight new_highlight = main_document_view->get_highlight_with_index(selected_highlight_index);
+		trigger_delete_highlight_in_tex(new_highlight);
 		main_document_view->delete_highlight_with_index(selected_highlight_index);
 		main_document_view->add_highlight(new_highlight.selection_begin, new_highlight.selection_end, symbol);
+		trigger_embed_highlight_in_tex(symbol);
 		selected_highlight_index = -1;
 	}
 }
@@ -4404,6 +4407,200 @@ void MainWidget::delete_markdown_annotation_at(int page, fz_rect rect) {
 		 << shared_db
 		 << file_path
 		 << rect_arg;
+
+	run_command(L"python", args, false);
+}
+
+void MainWidget::trigger_embed_highlight_in_tex(char symbol) {
+	if (!main_document_view || !doc() || selected_text.empty()) {
+		return;
+	}
+	std::wstring docpath = doc()->get_path();
+	if (docpath.empty()) {
+		return;
+	}
+	QString qdocpath = QString::fromStdWString(docpath);
+	QString synctex_gz = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex.gz";
+	QString synctex_plain = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex";
+	if (!QFile::exists(synctex_gz) && !QFile::exists(synctex_plain)) {
+		return;
+	}
+
+	int page = 0;
+	float min_x = 0, min_y = 0, max_x = 0, max_y = 0;
+	const auto& char_rects = main_document_view->selected_character_rects;
+	if (!char_rects.empty()) {
+		auto first_pt = doc()->absolute_to_page_pos({ char_rects.front().x0, char_rects.front().y0 });
+		page = first_pt.page;
+		min_x = first_pt.x;
+		min_y = first_pt.y;
+		max_x = first_pt.x;
+		max_y = first_pt.y;
+		for (const auto& r : char_rects) {
+			auto p0 = doc()->absolute_to_page_pos({ r.x0, r.y0 });
+			auto p1 = doc()->absolute_to_page_pos({ r.x1, r.y1 });
+			min_x = std::min({ min_x, p0.x, p1.x });
+			max_x = std::max({ max_x, p0.x, p1.x });
+			min_y = std::min({ min_y, p0.y, p1.y });
+			max_y = std::max({ max_y, p0.y, p1.y });
+		}
+	} else {
+		auto pt1 = doc()->absolute_to_page_pos(selection_begin);
+		auto pt2 = doc()->absolute_to_page_pos(selection_end);
+		page = pt1.page;
+		min_x = std::min(pt1.x, pt2.x);
+		max_x = std::max(pt1.x, pt2.x);
+		min_y = std::min(pt1.y, pt2.y);
+		max_y = std::max(pt1.y, pt2.y);
+	}
+
+	QString sioyek_path = QCoreApplication::applicationFilePath();
+	QString local_db = QString::fromStdWString(local_database_file_path.get_path());
+	QString shared_db = QString::fromStdWString(global_database_file_path.get_path());
+	QString rect_str = QString("%1,%2,%3,%4,%5").arg(page).arg(min_x, 0, 'f', 2).arg(min_y, 0, 'f', 2).arg(max_x, 0, 'f', 2).arg(max_y, 0, 'f', 2);
+	QString sym_str = QString(QChar(symbol));
+	QString text_str = QString::fromStdWString(selected_text);
+
+	QStringList args;
+	args << "-m" << "sioyek.embed_tex_annotation"
+	     << "highlight"
+	     << sioyek_path
+	     << local_db
+	     << shared_db
+	     << qdocpath
+	     << rect_str
+	     << sym_str
+	     << text_str;
+
+	run_command(L"python", args, false);
+}
+
+void MainWidget::trigger_embed_bookmark_in_tex(const std::wstring& title) {
+	if (!main_document_view || !doc() || title.empty()) {
+		return;
+	}
+	std::wstring docpath = doc()->get_path();
+	if (docpath.empty()) {
+		return;
+	}
+	QString qdocpath = QString::fromStdWString(docpath);
+	QString synctex_gz = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex.gz";
+	QString synctex_plain = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex";
+	if (!QFile::exists(synctex_gz) && !QFile::exists(synctex_plain)) {
+		return;
+	}
+
+	float offset_y = main_document_view->get_offset_y();
+	DocumentPos pos = doc()->absolute_to_page_pos({ 0, offset_y });
+	float page_w = doc()->get_page_width(pos.page);
+	float x = page_w * 0.5f;
+	float y = pos.y;
+
+	QString sioyek_path = QCoreApplication::applicationFilePath();
+	QString local_db = QString::fromStdWString(local_database_file_path.get_path());
+	QString shared_db = QString::fromStdWString(global_database_file_path.get_path());
+	QString pos_str = QString("%1,%2,%3").arg(pos.page).arg(x, 0, 'f', 2).arg(y, 0, 'f', 2);
+	QString title_str = QString::fromStdWString(title);
+
+	QStringList args;
+	args << "-m" << "sioyek.embed_tex_annotation"
+	     << "bookmark"
+	     << sioyek_path
+	     << local_db
+	     << shared_db
+	     << qdocpath
+	     << pos_str
+	     << title_str;
+
+	run_command(L"python", args, false);
+}
+
+void MainWidget::trigger_delete_highlight_in_tex(const Highlight& hl) {
+	if (!main_document_view || !doc()) {
+		return;
+	}
+	std::wstring docpath = doc()->get_path();
+	if (docpath.empty()) {
+		return;
+	}
+	QString qdocpath = QString::fromStdWString(docpath);
+	QString synctex_gz = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex.gz";
+	QString synctex_plain = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex";
+	if (!QFile::exists(synctex_gz) && !QFile::exists(synctex_plain)) {
+		return;
+	}
+
+	auto pt1 = doc()->absolute_to_page_pos(hl.selection_begin);
+	auto pt2 = doc()->absolute_to_page_pos(hl.selection_end);
+	int page = pt1.page;
+	float min_x = std::min(pt1.x, pt2.x);
+	float max_x = std::max(pt1.x, pt2.x);
+	float min_y = std::min(pt1.y, pt2.y);
+	float max_y = std::max(pt1.y, pt2.y);
+
+	QString sioyek_path = QCoreApplication::applicationFilePath();
+	QString local_db = QString::fromStdWString(local_database_file_path.get_path());
+	QString shared_db = QString::fromStdWString(global_database_file_path.get_path());
+	QString rect_str = QString("%1,%2,%3,%4,%5").arg(page).arg(min_x, 0, 'f', 2).arg(min_y, 0, 'f', 2).arg(max_x, 0, 'f', 2).arg(max_y, 0, 'f', 2);
+	QString sym_str = QString(QChar(hl.type));
+	QString text_str = QString::fromStdWString(hl.description);
+
+	QStringList args;
+	args << "-m" << "sioyek.embed_tex_annotation"
+	     << "delete_highlight"
+	     << sioyek_path
+	     << local_db
+	     << shared_db
+	     << qdocpath
+	     << rect_str
+	     << sym_str
+	     << text_str;
+
+	run_command(L"python", args, false);
+}
+
+void MainWidget::trigger_delete_closest_bookmark_in_tex() {
+	if (!main_document_view || !doc()) {
+		return;
+	}
+	std::wstring docpath = doc()->get_path();
+	if (docpath.empty()) {
+		return;
+	}
+	QString qdocpath = QString::fromStdWString(docpath);
+	QString synctex_gz = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex.gz";
+	QString synctex_plain = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex";
+	if (!QFile::exists(synctex_gz) && !QFile::exists(synctex_plain)) {
+		return;
+	}
+
+	const auto& bms = doc()->get_bookmarks();
+	if (bms.empty()) return;
+	float offset_y = main_document_view->get_offset_y();
+	int closest_idx = doc()->find_closest_bookmark_index(bms, offset_y);
+	if (closest_idx < 0 || closest_idx >= (int)bms.size()) return;
+
+	const auto& bm = bms[closest_idx];
+	DocumentPos pos = doc()->absolute_to_page_pos({ 0, bm.y_offset });
+	float page_w = doc()->get_page_width(pos.page);
+	float x = page_w * 0.5f;
+	float y = pos.y;
+
+	QString sioyek_path = QCoreApplication::applicationFilePath();
+	QString local_db = QString::fromStdWString(local_database_file_path.get_path());
+	QString shared_db = QString::fromStdWString(global_database_file_path.get_path());
+	QString pos_str = QString("%1,%2,%3").arg(pos.page).arg(x, 0, 'f', 2).arg(y, 0, 'f', 2);
+	QString title_str = QString::fromStdWString(bm.description);
+
+	QStringList args;
+	args << "-m" << "sioyek.embed_tex_annotation"
+	     << "delete_bookmark"
+	     << sioyek_path
+	     << local_db
+	     << shared_db
+	     << qdocpath
+	     << pos_str
+	     << title_str;
 
 	run_command(L"python", args, false);
 }
@@ -4891,6 +5088,8 @@ void MainWidget::handle_delete_highlight_under_cursor() {
 	WindowPos window_pos = WindowPos{ mouse_pos.x(), mouse_pos.y() };
 	int sel_highlight = main_document_view->get_highlight_index_in_pos(window_pos);
 	if (sel_highlight != -1) {
+		Highlight hl = main_document_view->get_highlight_with_index(sel_highlight);
+		trigger_delete_highlight_in_tex(hl);
 		main_document_view->delete_highlight_with_index(sel_highlight);
 	}
 }

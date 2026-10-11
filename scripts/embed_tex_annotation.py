@@ -1,0 +1,588 @@
+"""
+Automatically embed highlights and bookmarks directly into LaTeX source files
+for SyncTeX-enabled PDF documents.
+
+Commands supported:
+    python -m sioyek.embed_tex_annotation highlight SIOYEK LOCAL_DB SHARED_DB PDF RECT TYPE TEXT
+    python -m sioyek.embed_tex_annotation bookmark SIOYEK LOCAL_DB SHARED_DB PDF POS TITLE
+    python -m sioyek.embed_tex_annotation delete_highlight SIOYEK LOCAL_DB SHARED_DB PDF RECT TYPE TEXT
+    python -m sioyek.embed_tex_annotation delete_bookmark SIOYEK LOCAL_DB SHARED_DB PDF POS TITLE
+    python -m sioyek.embed_tex_annotation undo SIOYEK LOCAL_DB SHARED_DB PDF [highlight|bookmark]
+"""
+
+import sys
+import os
+import re
+import json
+import glob
+import shutil
+import hashlib
+import datetime
+import traceback
+
+from .sioyek import Sioyek, clean_path
+from .add_study_note import (
+    TexFile, atomic_write, make_backup, sha1,
+    has_synctex_data, find_synctex_binary, synctex_query, resolve_source,
+    map_stale_line, scan_states, find_insert_line, find_document_bounds,
+    split_comment, strip_eol, find_root_file, BACKUP_DIR_NAME, BACKUP_KEEP,
+)
+
+LOG_PATH = os.path.expanduser("~/.config/sioyek/add_text.log")
+ANNOT_HISTORY_PATH = os.path.expanduser("~/.config/sioyek/annotation_history.json")
+ANNOT_HISTORY_KEEP = 50
+
+MARKER_HL_BEGIN = "%% >>> sioyek highlight >>>"
+MARKER_HL_END = "%% <<< sioyek highlight <<<"
+HL_DEFINITION_LINES = [
+    MARKER_HL_BEGIN,
+    r"\makeatletter",
+    r"\@ifpackageloaded{xcolor}{}{\@ifpackageloaded{color}{}{\usepackage{xcolor}}}",
+    r"\@ifpackageloaded{soul}{}{\usepackage{soul}}",
+    r"% Fix soul + xcolor: mixed color expressions (e.g. yellow!40) clobber \dimen@ during evaluation,",
+    r"% shrinking syllable widths to 0.4pt and leaving only spaces highlighted. Freeze width in \SOUL@curwd.",
+    r"\def\SOUL@ulunderline#1{{%",
+    r"  \setbox\z@\hbox{#1}%",
+    r"  \dimen@=\wd\z@",
+    r"  \dimen@i=\SOUL@uloverlap",
+    r"  \advance\dimen@ 2\dimen@i",
+    r"  \edef\SOUL@curwd{\the\dimen@}%",
+    r"  \rlap{%",
+    r"    \null",
+    r"    \kern-\dimen@i",
+    r"    \SOUL@ulcolor{\SOUL@ulleaders\hskip\SOUL@curwd\relax}%",
+    r"  }%",
+    r"  \unhcopy\z@",
+    r"}}",
+    r"\colorlet{sioyek_a}{yellow!40}",
+    r"\colorlet{sioyek_b}{cyan!30}",
+    r"\colorlet{sioyek_c}{green!30}",
+    r"\colorlet{sioyek_d}{pink!40}",
+    r"\colorlet{sioyek_e}{orange!40}",
+    r"\colorlet{sioyek_r}{red!30}",
+    r"\colorlet{sioyek_g}{green!30}",
+    r"\colorlet{sioyek_y}{yellow!40}",
+    r"\newcommand{\sioyekhlcol@a}{\sethlcolor{sioyek_a}}",
+    r"\newcommand{\sioyekhlcol@b}{\sethlcolor{sioyek_b}}",
+    r"\newcommand{\sioyekhlcol@c}{\sethlcolor{sioyek_c}}",
+    r"\newcommand{\sioyekhlcol@d}{\sethlcolor{sioyek_d}}",
+    r"\newcommand{\sioyekhlcol@e}{\sethlcolor{sioyek_e}}",
+    r"\newcommand{\sioyekhlcol@r}{\sethlcolor{sioyek_r}}",
+    r"\newcommand{\sioyekhlcol@g}{\sethlcolor{sioyek_g}}",
+    r"\newcommand{\sioyekhlcol@y}{\sethlcolor{sioyek_y}}",
+    r"\newif\ifsioyekhl \sioyekhltrue",
+    r"% \sioyekhlfalse   % uncomment to hide all highlights",
+    r"\providecommand{\sioyekhl}[2][a]{%",
+    r"  \ifsioyekhl%",
+    r"    \begingroup%",
+    r"    \expandafter\ifx\csname sioyekhlcol@#1\endcsname\relax%",
+    r"      \sethlcolor{sioyek_a}%",
+    r"    \else%",
+    r"      \csname sioyekhlcol@#1\endcsname%",
+    r"    \fi%",
+    r"    \hl{#2}%",
+    r"    \endgroup%",
+    r"  \else#2\fi%",
+    r"}",
+    r"\providecommand{\sioyekhlmark}[2][a]{%",
+    r"  \ifsioyekhl\marginpar{\raggedright\footnotesize\color{orange}\textbf{[HL:#1]} #2}\fi%",
+    r"}",
+    r"\makeatother",
+    MARKER_HL_END,
+]
+
+MARKER_BM_BEGIN = "%% >>> sioyek bookmarks >>>"
+MARKER_BM_END = "%% <<< sioyek bookmarks <<<"
+BM_DEFINITION_LINES = [
+    MARKER_BM_BEGIN,
+    r"\makeatletter",
+    r"\@ifpackageloaded{hyperref}{}{%",
+    r"  \providecommand{\pdfbookmark}[3][]{}%",
+    r"}",
+    r"\makeatother",
+    MARKER_BM_END,
+]
+
+
+def log(msg):
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(f"[embed_annot] {msg}\n")
+    except Exception:
+        pass
+
+
+def notify_sioyek(sioyek, msg):
+    if not msg:
+        return
+    log(msg)
+    try:
+        if sioyek is not None:
+            sioyek.set_status_string(msg)
+    except Exception:
+        pass
+
+
+def load_annot_history():
+    try:
+        with open(ANNOT_HISTORY_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_annot_history(hist):
+    try:
+        os.makedirs(os.path.dirname(ANNOT_HISTORY_PATH), exist_ok=True)
+        with open(ANNOT_HISTORY_PATH, "w", encoding="utf-8") as f:
+            json.dump(hist[-ANNOT_HISTORY_KEEP:], f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+def commit_annot_files(texfiles, pdf_path, kind, description):
+    entry = {
+        "kind": kind,
+        "pdf": pdf_path,
+        "time": datetime.datetime.now().isoformat(),
+        "desc": description,
+        "files": []
+    }
+    for tf in texfiles:
+        new_data = tf.to_bytes()
+        if new_data == tf.original_raw:
+            continue
+        bpath = make_backup(tf.path, tf.original_raw)
+        atomic_write(tf.path, new_data)
+        entry["files"].append({
+            "path": tf.path,
+            "backup": bpath,
+            "after_sha1": sha1(new_data)
+        })
+    if entry["files"]:
+        hist = load_annot_history()
+        hist.append(entry)
+        save_annot_history(hist)
+    return entry
+
+
+def inject_hl_definition(tf):
+    # If definition block already exists, check if it needs upgrading to the SOUL@curwd fix
+    for i, line in enumerate(tf.lines):
+        if MARKER_HL_BEGIN in line:
+            end_idx = -1
+            has_curwd = False
+            for j in range(i, len(tf.lines)):
+                if r"\SOUL@curwd" in tf.lines[j]:
+                    has_curwd = True
+                if MARKER_HL_END in tf.lines[j]:
+                    end_idx = j
+                    break
+            if has_curwd:
+                return False
+            if end_idx != -1:
+                nl = tf.newline
+                block = [l + nl for l in HL_DEFINITION_LINES]
+                tf.lines[i:end_idx + 1] = block
+                return True
+            return False
+        code, _ = split_comment(strip_eol(line)[0])
+        if r"\providecommand{\sioyekhl}" in code:
+            return False
+    begin, _ = find_document_bounds(tf.lines)
+    if begin is None:
+        return False
+    nl = tf.newline
+    if begin > 0 and not tf.lines[begin - 1].endswith(("\n", "\r")):
+        tf.lines[begin - 1] += nl
+    block = [l + nl for l in HL_DEFINITION_LINES]
+    tf.lines[begin:begin] = block
+    return True
+
+
+def inject_bm_definition(tf):
+    for line in tf.lines:
+        code, _ = split_comment(strip_eol(line)[0])
+        if MARKER_BM_BEGIN in line or MARKER_BM_BEGIN in code:
+            return False
+    begin, _ = find_document_bounds(tf.lines)
+    if begin is None:
+        return False
+    nl = tf.newline
+    if begin > 0 and not tf.lines[begin - 1].endswith(("\n", "\r")):
+        tf.lines[begin - 1] += nl
+    block = [l + nl for l in BM_DEFINITION_LINES]
+    tf.lines[begin:begin] = block
+    return True
+
+
+def parse_rect_or_pos(s):
+    s = clean_path(s).strip()
+    parts = [clean_path(p).strip() for p in re.split(r'[, ]+', s) if p.strip()]
+    page = int(parts[0])
+    vals = [float(p) for p in parts[1:]]
+    if len(vals) >= 4:
+        return page, [min(vals[0], vals[2]), min(vals[1], vals[3]), max(vals[0], vals[2]), max(vals[1], vals[3])]
+    elif len(vals) == 2:
+        return page, [vals[0], vals[1], vals[0], vals[1]]
+    elif len(vals) == 1:
+        return page, [100.0, vals[0], 100.0, vals[0]]
+    return page, [0.0, 0.0, 0.0, 0.0]
+
+
+# ---------------------------------------------------------------------------
+# Highlight Logic
+# ---------------------------------------------------------------------------
+
+def is_line_in_math_or_unsafe(state):
+    depth, math, stack, in_verb = state
+    if in_verb or math is not None:
+        return True
+    for env in stack:
+        env_b = env.rstrip("*")
+        if env_b in ("equation", "align", "gather", "multline", "figure", "table", "tabular", "tikzpicture"):
+            return True
+    return False
+
+
+def try_wrap_in_line(line_str, text_to_wrap, type_char):
+    r"""
+    Tries to find text_to_wrap in line_str (code part only) and wrap it as \sioyekhl[type]{...}.
+    Returns (new_line_str, True) on success, or (line_str, False).
+    """
+    body, eol = strip_eol(line_str)
+    code, comment = split_comment(body)
+    if not code.strip():
+        return line_str, False
+
+    # Already wrapped?
+    if f"\\sioyekhl[{type_char}]{{{text_to_wrap}}}" in code or f"\\sioyekhl{{{text_to_wrap}}}" in code:
+        return line_str, True
+
+    # 1. Exact match in code
+    idx = code.find(text_to_wrap)
+    if idx >= 0:
+        # Check that we aren't inside a macro name like \section{...} where text is the macro name
+        before = code[:idx]
+        if before.endswith("\\"):
+            return line_str, False
+        wrapped = f"\\sioyekhl[{type_char}]{{{text_to_wrap}}}"
+        new_code = code[:idx] + wrapped + code[idx + len(text_to_wrap):]
+        return new_code + comment + eol, True
+
+    # 2. Whitespace-flexible regex match
+    words = [w for w in text_to_wrap.split() if w]
+    if len(words) > 1:
+        pattern = r"\s+".join(re.escape(w) for w in words)
+        m = re.search(pattern, code)
+        if m:
+            matched_slice = m.group(0)
+            wrapped = f"\\sioyekhl[{type_char}]{{{matched_slice}}}"
+            new_code = code[:m.start()] + wrapped + code[m.end():]
+            return new_code + comment + eol, True
+
+    return line_str, False
+
+
+def embed_highlight(pdf_path, rect_str, type_char, selected_text):
+    if not has_synctex_data(pdf_path):
+        log(f"embed_highlight: no synctex data for {pdf_path}, skipping")
+        return None
+
+    page, rect = parse_rect_or_pos(rect_str)
+    text = selected_text.strip()
+    if not text:
+        return None
+
+    tex_path, synctex_line = resolve_source(pdf_path, page, rect)
+    tf = TexFile(tex_path)
+    current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
+    target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
+
+    states = scan_states(tf.lines)
+
+    # Search window around target_idx: [target_idx - 3, target_idx + 4]
+    lo = max(0, target_idx - 3)
+    hi = min(len(tf.lines), target_idx + 5)
+    matched_idx = -1
+
+    # First check if target_idx itself or near lines match
+    search_indices = [target_idx] + [i for i in range(lo, hi) if i != target_idx]
+    wrapped_success = False
+
+    for idx in search_indices:
+        if is_line_in_math_or_unsafe(states[idx]):
+            continue
+        new_line, ok = try_wrap_in_line(tf.lines[idx], text, type_char)
+        if ok:
+            tf.lines[idx] = new_line
+            matched_idx = idx
+            wrapped_success = True
+            break
+
+    # If single-line wrap didn't succeed, try 2-line split wrap if text has multiple words
+    if not wrapped_success and len(text.split()) >= 2:
+        words = text.split()
+        for idx in range(lo, min(hi, len(tf.lines) - 1)):
+            if is_line_in_math_or_unsafe(states[idx]) or is_line_in_math_or_unsafe(states[idx + 1]):
+                continue
+            for split_pt in range(1, len(words)):
+                part1 = " ".join(words[:split_pt])
+                part2 = " ".join(words[split_pt:])
+                line1_code, _ = split_comment(strip_eol(tf.lines[idx])[0])
+                line2_code, _ = split_comment(strip_eol(tf.lines[idx + 1])[0])
+                if part1 in line1_code and part2 in line2_code:
+                    nl1, ok1 = try_wrap_in_line(tf.lines[idx], part1, type_char)
+                    nl2, ok2 = try_wrap_in_line(tf.lines[idx + 1], part2, type_char)
+                    if ok1 and ok2:
+                        tf.lines[idx] = nl1
+                        tf.lines[idx + 1] = nl2
+                        matched_idx = idx
+                        wrapped_success = True
+                        break
+            if wrapped_success:
+                break
+
+    # If still not wrapped (e.g. inside formula or complex markup), fallback safely to margin mark
+    if not wrapped_success:
+        safe_idx, _ = find_insert_line(tf.lines, target_idx)
+        body, eol = strip_eol(tf.lines[safe_idx])
+        code, comment = split_comment(body)
+        short_text = text[:40] + ("..." if len(text) > 40 else "")
+        short_text = re.sub(r"[{}\\]", "", short_text)
+        mark = f" \\sioyekhlmark[{type_char}]{{{short_text}}}"
+        tf.lines[safe_idx] = code.rstrip(" \t") + mark + (" " + comment if comment else "") + eol
+        matched_idx = safe_idx
+        action_verb = "已嵌入页边高亮标记"
+    else:
+        action_verb = "已高亮源码"
+
+    files_to_commit = [tf]
+    root_path = find_root_file(tex_path, pdf_path)
+    if root_path:
+        if os.path.normpath(root_path) == os.path.normpath(tex_path):
+            inject_hl_definition(tf)
+        else:
+            root_tf = TexFile(root_path)
+            if inject_hl_definition(root_tf):
+                files_to_commit.append(root_tf)
+
+    desc = f"高亮 [{type_char}] @ {os.path.basename(tex_path)}:{matched_idx + 1}: {text[:30]}"
+    commit_annot_files(files_to_commit, pdf_path, "highlight", desc)
+    return f"{action_verb} [{type_char}]：{os.path.basename(tex_path)}:{matched_idx + 1}（等待编译）"
+
+
+# ---------------------------------------------------------------------------
+# Bookmark Logic
+# ---------------------------------------------------------------------------
+
+def embed_bookmark(pdf_path, pos_str, title):
+    if not has_synctex_data(pdf_path):
+        log(f"embed_bookmark: no synctex data for {pdf_path}, skipping")
+        return None
+
+    page, rect = parse_rect_or_pos(pos_str)
+    clean_t = title.strip()
+    if not clean_t:
+        return None
+
+    tex_path, synctex_line = resolve_source(pdf_path, page, rect)
+    tf = TexFile(tex_path)
+    current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
+    target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
+
+    safe_idx, _ = find_insert_line(tf.lines, target_idx)
+
+    # Unique anchor slug
+    slug = re.sub(r"[^a-zA-Z0-9_\u4e00-\u9fa5]+", "_", clean_t)[:20]
+    hash_tag = hashlib.md5((clean_t + str(safe_idx)).encode()).hexdigest()[:6]
+    bm_id = f"bm_{slug}_{hash_tag}"
+
+    bm_macro = f"\\pdfbookmark[2]{{{clean_t}}}{{{bm_id}}}" + tf.newline
+    # Insert right before safe_idx
+    tf.lines.insert(safe_idx, bm_macro)
+
+    files_to_commit = [tf]
+    root_path = find_root_file(tex_path, pdf_path)
+    if root_path:
+        if os.path.normpath(root_path) == os.path.normpath(tex_path):
+            inject_bm_definition(tf)
+        else:
+            root_tf = TexFile(root_path)
+            if inject_bm_definition(root_tf):
+                files_to_commit.append(root_tf)
+
+    desc = f"书签「{clean_t}」@ {os.path.basename(tex_path)}:{safe_idx + 1}"
+    commit_annot_files(files_to_commit, pdf_path, "bookmark", desc)
+    return f"已嵌入书签「{clean_t}」：{os.path.basename(tex_path)}:{safe_idx + 1}（等待编译）"
+
+
+# ---------------------------------------------------------------------------
+# Deletion & Undo
+# ---------------------------------------------------------------------------
+
+def delete_highlight(pdf_path, rect_str, type_char, selected_text):
+    if not has_synctex_data(pdf_path):
+        return None
+
+    page, rect = parse_rect_or_pos(rect_str)
+    tex_path, synctex_line = resolve_source(pdf_path, page, rect)
+    tf = TexFile(tex_path)
+    current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
+    target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
+
+    lo = max(0, target_idx - 5)
+    hi = min(len(tf.lines), target_idx + 6)
+    modified = False
+
+    for idx in range(lo, hi):
+        line = tf.lines[idx]
+        # Look for \sioyekhl[type]{...}
+        m = re.search(r"\\sioyekhl(?:\[[^\]]*\])?\{([^{}]*)\}", line)
+        if m:
+            content = m.group(1)
+            tf.lines[idx] = line[:m.start()] + content + line[m.end():]
+            modified = True
+            break
+        # Look for \sioyekhlmark[type]{...}
+        m2 = re.search(r"\\sioyekhlmark(?:\[[^\]]*\])?\{[^{}]*\}", line)
+        if m2:
+            tf.lines[idx] = line[:m2.start()].rstrip(" \t") + line[m2.end():]
+            modified = True
+            break
+
+    if modified:
+        desc = f"删除高亮 @ {os.path.basename(tex_path)}:{target_idx + 1}"
+        commit_annot_files([tf], pdf_path, "highlight", desc)
+        return f"已从 {os.path.basename(tex_path)}:{target_idx + 1} 移除高亮（等待编译）"
+    return None
+
+
+def delete_bookmark(pdf_path, pos_str, title):
+    if not has_synctex_data(pdf_path):
+        return None
+
+    page, rect = parse_rect_or_pos(pos_str)
+    clean_t = title.strip()
+    tex_path, synctex_line = resolve_source(pdf_path, page, rect)
+    tf = TexFile(tex_path)
+    current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
+    target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
+
+    lo = max(0, target_idx - 5)
+    hi = min(len(tf.lines), target_idx + 6)
+    del_idx = -1
+
+    for idx in range(lo, hi):
+        line = tf.lines[idx]
+        if r"\pdfbookmark" in line and clean_t in line:
+            del_idx = idx
+            break
+
+    if del_idx >= 0:
+        del tf.lines[del_idx]
+        desc = f"删除书签「{clean_t}」@ {os.path.basename(tex_path)}:{del_idx + 1}"
+        commit_annot_files([tf], pdf_path, "bookmark", desc)
+        return f"已从 {os.path.basename(tex_path)} 移除书签「{clean_t}」（等待编译）"
+    return None
+
+
+def undo_annotation(pdf_path, target_kind=None):
+    hist = load_annot_history()
+    idx = None
+    for i in range(len(hist) - 1, -1, -1):
+        item = hist[i]
+        if os.path.normpath(item.get("pdf", "")) == os.path.normpath(pdf_path):
+            if target_kind is None or item.get("kind") == target_kind:
+                idx = i
+                break
+
+    if idx is None:
+        target_name = "高亮/书签" if target_kind is None else ("高亮" if target_kind == "highlight" else "书签")
+        return f"没有可撤销的 {target_name} 写入"
+
+    entry = hist[idx]
+    for fi in entry["files"]:
+        if not os.path.exists(fi["path"]):
+            return f"文件不存在: {fi['path']}"
+        with open(fi["path"], "rb") as f:
+            cur = f.read()
+        if sha1(cur) != fi["after_sha1"]:
+            return f"{os.path.basename(fi['path'])} 已被手动修改，无法安全撤销；备份在 {fi['backup']}"
+        if not os.path.exists(fi["backup"]):
+            return f"备份丢失: {fi['backup']}"
+
+    for fi in entry["files"]:
+        with open(fi["backup"], "rb") as f:
+            data = f.read()
+        atomic_write(fi["path"], data)
+
+    del hist[idx]
+    save_annot_history(hist)
+    names = ", ".join(os.path.basename(f["path"]) for f in entry["files"])
+    return f"已撤销：{entry['desc']}（已恢复 {names}，等待编译）"
+
+
+# ---------------------------------------------------------------------------
+# CLI Entrypoint
+# ---------------------------------------------------------------------------
+
+def main():
+    if len(sys.argv) < 6:
+        print("Usage: python -m sioyek.embed_tex_annotation <action> SIOYEK LOCAL_DB SHARED_DB PDF [ARGS...]")
+        return
+
+    action = sys.argv[1].lower()
+    sioyek_path = clean_path(sys.argv[2])
+    local_db = clean_path(sys.argv[3])
+    shared_db = clean_path(sys.argv[4])
+    pdf_path = os.path.abspath(clean_path(sys.argv[5]))
+
+    try:
+        sioyek = Sioyek(sioyek_path, local_db, shared_db)
+    except Exception:
+        sioyek = None
+
+    msg = None
+    try:
+        if action == "highlight" and len(sys.argv) >= 9:
+            rect_str = clean_path(sys.argv[6])
+            type_char = clean_path(sys.argv[7]) or "a"
+            selected_text = sys.argv[8]
+            msg = embed_highlight(pdf_path, rect_str, type_char, selected_text)
+
+        elif action == "bookmark" and len(sys.argv) >= 8:
+            pos_str = clean_path(sys.argv[6])
+            title = sys.argv[7]
+            msg = embed_bookmark(pdf_path, pos_str, title)
+
+        elif action == "delete_highlight" and len(sys.argv) >= 9:
+            rect_str = clean_path(sys.argv[6])
+            type_char = clean_path(sys.argv[7]) or "a"
+            selected_text = sys.argv[8]
+            msg = delete_highlight(pdf_path, rect_str, type_char, selected_text)
+
+        elif action == "delete_bookmark" and len(sys.argv) >= 8:
+            pos_str = clean_path(sys.argv[6])
+            title = sys.argv[7]
+            msg = delete_bookmark(pdf_path, pos_str, title)
+
+        elif action == "undo":
+            target_kind = clean_path(sys.argv[6]) if len(sys.argv) > 6 else None
+            msg = undo_annotation(pdf_path, target_kind)
+
+        else:
+            log(f"Unknown action or insufficient args: {sys.argv}")
+
+    except Exception as e:
+        log(f"Error in {action}: {e}\n{traceback.format_exc()}")
+        msg = f"TeX 批注出错: {e}"
+
+    if msg:
+        print(msg)
+        notify_sioyek(sioyek, msg)
+
+
+if __name__ == "__main__":
+    main()

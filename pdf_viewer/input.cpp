@@ -192,6 +192,7 @@ class RegexSearchCommand : public TextCommand {
 
 class AddBookmarkCommand : public TextCommand {
 	void perform(MainWidget* widget) {
+		widget->trigger_embed_bookmark_in_tex(text.value());
 		widget->main_document_view->add_bookmark(text.value());
 	}
 
@@ -659,6 +660,7 @@ class DeleteAllPortalsCommand : public Command {
 
 class DeleteBookmarkCommand : public Command {
 	void perform(MainWidget* widget) {
+		widget->trigger_delete_closest_bookmark_in_tex();
 		widget->main_document_view->delete_closest_bookmark();
 		widget->validate_render();
 	}
@@ -671,6 +673,8 @@ class DeleteBookmarkCommand : public Command {
 class DeleteHighlightCommand : public Command {
 	void perform(MainWidget* widget) {
 		if (widget->selected_highlight_index != -1) {
+			Highlight hl = widget->main_document_view->get_highlight_with_index(widget->selected_highlight_index);
+			widget->trigger_delete_highlight_in_tex(hl);
 			widget->main_document_view->delete_highlight_with_index(widget->selected_highlight_index);
 			widget->selected_highlight_index = -1;
 		}
@@ -1587,6 +1591,7 @@ class SetSelectHighlightTypeCommand : public SymbolCommand {
 class AddHighlightWithCurrentTypeCommand : public Command {
 	void perform(MainWidget* widget) {
         if (widget->main_document_view->selected_character_rects.size() > 0) {
+            widget->trigger_embed_highlight_in_tex(widget->select_highlight_type);
             widget->main_document_view->add_highlight(widget->selection_begin, widget->selection_end, widget->select_highlight_type);
             widget->main_document_view->selected_character_rects.clear();
             widget->selected_text.clear();
