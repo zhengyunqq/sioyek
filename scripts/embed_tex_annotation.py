@@ -85,8 +85,9 @@ HL_DEFINITION_LINES = [
     r"    \fi%",
     r"  \fi%",
     r"}",
+    r"\@ifpackageloaded{marginnote}{}{\usepackage{marginnote}}",
     r"\providecommand{\sioyekhlmark}[2][a]{%",
-    r"  \ifsioyekhl\marginpar{\raggedright\footnotesize\color{\sioyek@gethlcolor{#1}}\textbf{[Highlight:} #2\textbf{]}}\fi%",
+    r"  \ifsioyekhl\marginnote{\raggedright\footnotesize\color{\sioyek@gethlcolor{#1}}\textbf{[Highlight:} #2\textbf{]}}\fi%",
     r"}",
     r"\providecommand{\sioyekhl}[2][a]{%",
     r"  \sioyekhlmark[#1]{#2}%",
@@ -167,7 +168,7 @@ def inject_hl_definition(tf):
             for j in range(i, len(tf.lines)):
                 if (r"\sioyekhlbeginmark" in tf.lines[j] and
                     r"\sioyekhlmark" in tf.lines[j] and
-                    r"\marginpar" in tf.lines[j]):
+                    (r"\marginnote" in tf.lines[j] or r"\marginpar" in tf.lines[j])):
                     has_all_macros = True
                 if MARKER_HL_END in tf.lines[j]:
                     end_idx = j
@@ -255,9 +256,11 @@ def format_hl_snippet(selected_text, max_len=45):
 
 
 def normalize_probe_regex(word):
-    r"""Builds a regex snippet that matches word with optional quotes/apostrophes."""
+    r"""Builds a regex snippet that matches word with optional quotes/apostrophes and word boundaries."""
     w_escaped = re.escape(word)
-    return r'(?:``|"|“|‘|`)?' + w_escaped + r"(?:''|\"|”|’|')?"
+    prefix = r"\b" if word and word[0].isalnum() else ""
+    suffix = r"\b" if word and word[-1].isalnum() else ""
+    return r'(?:``|"|“|‘|`)?' + prefix + w_escaped + suffix + r"(?:''|\"|”|’|')?"
 
 
 def get_start_probe_candidates(selected_text):
