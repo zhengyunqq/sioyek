@@ -217,6 +217,112 @@ def is_line_in_math_or_unsafe(state):
     return False
 
 
+def normalize_probe_regex(word):
+    r"""Builds a regex snippet that matches word with optional quotes/apostrophes."""
+    w_escaped = re.escape(word)
+    return r'(?:``|"|“|‘|`)?' + w_escaped + r"(?:''|\"|”|’|')?"
+
+
+def extract_probes(selected_text):
+    r"""Extracts robust start and end probe words/chars from selected text."""
+    text = selected_text.strip()
+    has_cjk = bool(re.search(r'[\u4e00-\u9fa5]', text))
+    if has_cjk:
+        cjk_chars = re.findall(r'[\u4e00-\u9fa5]', text)
+        start_probe = ''.join(cjk_chars[:min(4, len(cjk_chars))])
+        end_probe = ''.join(cjk_chars[-min(4, len(cjk_chars)):])
+        return start_probe, end_probe, True
+
+    words = text.split()
+    start_words = []
+    for w in words:
+        cw = re.sub(r'^[^\w]+|[^\w]+$', '', w)
+        if len(cw) >= 2 and re.search(r'[a-zA-Z0-9]', cw):
+            start_words.append(cw)
+        if len(start_words) >= 3:
+            break
+
+    # End probe: find last word with letters
+    last_word_idx = -1
+    for i in range(len(words) - 1, -1, -1):
+        cw = re.sub(r'^[^\w]+|[^\w]+$', '', words[i])
+        if (len(cw) >= 2 or cw in ('a', 'A', 'I')) and re.match(r'^[a-zA-Z]+$', cw):
+            if not any(cw.lower().startswith(p) for p in ['tau', 'alpha', 'beta', 'gamma']):
+                last_word_idx = i
+                break
+    if last_word_idx == -1:
+        end_words = [re.sub(r'^[^\w]+|[^\w]+$', '', w) for w in words[-min(3, len(words)):]]
+    else:
+        start_idx = max(0, last_word_idx - 2)
+        end_words = [re.sub(r'^[^\w]+|[^\w]+$', '', w) for w in words[start_idx : last_word_idx + 1]]
+    end_words = [w for w in end_words if w]
+
+    return start_words, end_words, False
+
+
+def find_start_in_line(code, start_probe, is_cjk):
+    r"""Returns the start character index of start_probe in code, or -1."""
+    if is_cjk:
+        m = re.search(re.escape(start_probe), code)
+        return m.start() if m else -1
+    parts = [normalize_probe_regex(w) for w in start_probe]
+    pat = r'\s+'.join(parts)
+    m = re.search(pat, code)
+    if m:
+        if code[:m.start()].endswith('\\'):
+            return -1
+        return m.start()
+    # Try fewer words if 3 didn't match
+    if len(start_probe) > 1:
+        parts = [normalize_probe_regex(w) for w in start_probe[:2]]
+        pat = r'\s+'.join(parts)
+        m = re.search(pat, code)
+        if m and not code[:m.start()].endswith('\\'):
+            return m.start()
+    return -1
+
+
+def find_end_in_line(code, end_probe, is_cjk, selected_text, start_offset=0):
+    r"""Returns the end character index of end_probe in code, or -1."""
+    sub_code = code[start_offset:]
+    abs_end = -1
+    if is_cjk:
+        matches = list(re.finditer(re.escape(end_probe), sub_code))
+        if matches:
+            m_end = matches[-1]
+            abs_end = start_offset + m_end.end()
+    else:
+        parts = [normalize_probe_regex(w) for w in end_probe]
+        pat = r'\s+'.join(parts)
+        matches = list(re.finditer(pat, sub_code))
+        if not matches and len(end_probe) > 1:
+            # Fallback to last 2 words of end probe
+            parts = [normalize_probe_regex(w) for w in end_probe[-2:]]
+            pat = r'\s+'.join(parts)
+            matches = list(re.finditer(pat, sub_code))
+        if matches:
+            m_end = matches[-1]
+            abs_end = start_offset + m_end.end()
+            # Align tail (formulas, punctuation)
+            last_word = end_probe[-1]
+            idx_in_pdf = selected_text.rfind(last_word)
+            pdf_tail = selected_text[idx_in_pdf + len(last_word):].strip() if idx_in_pdf >= 0 else ''
+            tail_code = code[abs_end:]
+            if pdf_tail:
+                last_char = pdf_tail[-1]
+                if last_char in '.!?,;:)]}"\'':
+                    p_idx = tail_code.find(last_char)
+                    if p_idx >= 0:
+                        abs_end += p_idx + 1
+                elif '$' in tail_code:
+                    first_dollar = tail_code.find('$')
+                    if first_dollar >= 0:
+                        second_dollar = tail_code.find('$', first_dollar + 1)
+                        if second_dollar >= 0:
+                            abs_end += second_dollar + 1
+    return abs_end
+
+
 def try_mark_in_single_line(line_str, text_to_wrap, type_char):
     r"""
     Tries to find text_to_wrap in line_str (code part only) and wrap with marks:
@@ -248,64 +354,13 @@ def try_mark_in_single_line(line_str, text_to_wrap, type_char):
     # 2. Whitespace-flexible regex match
     words = [w for w in text_to_wrap.split() if w]
     if len(words) > 1:
-        pattern = r"\s+".join(re.escape(w) for w in words)
+        parts = [normalize_probe_regex(w) for w in words]
+        pattern = r"\s+".join(parts)
         m = re.search(pattern, code)
         if m:
             matched_slice = m.group(0)
             marked = f"{b_tag}{matched_slice}{e_tag}"
             new_code = code[:m.start()] + marked + code[m.end():]
-            return new_code + comment + eol, True
-
-    return line_str, False
-
-
-def try_mark_start_in_line(line_str, text_start, type_char):
-    """Inserts \\sioyekhlbegin[type] immediately before text_start in line_str."""
-    body, eol = strip_eol(line_str)
-    code, comment = split_comment(body)
-    b_tag = f"\\sioyekhlbegin[{type_char}]"
-    if b_tag in code:
-        return line_str, True
-
-    idx = code.find(text_start)
-    if idx >= 0:
-        if code[:idx].endswith("\\"):
-            return line_str, False
-        new_code = code[:idx] + b_tag + code[idx:]
-        return new_code + comment + eol, True
-
-    words = [w for w in text_start.split() if w]
-    if words:
-        pattern = r"\s+".join(re.escape(w) for w in words)
-        m = re.search(pattern, code)
-        if m:
-            new_code = code[:m.start()] + b_tag + code[m.start():]
-            return new_code + comment + eol, True
-
-    return line_str, False
-
-
-def try_mark_end_in_line(line_str, text_end, type_char):
-    """Inserts \\sioyekhlend[type] immediately after text_end in line_str."""
-    body, eol = strip_eol(line_str)
-    code, comment = split_comment(body)
-    e_tag = f"\\sioyekhlend[{type_char}]"
-    if e_tag in code:
-        return line_str, True
-
-    idx = code.rfind(text_end)
-    if idx >= 0:
-        end_pos = idx + len(text_end)
-        new_code = code[:end_pos] + e_tag + code[end_pos:]
-        return new_code + comment + eol, True
-
-    words = [w for w in text_end.split() if w]
-    if words:
-        pattern = r"\s+".join(re.escape(w) for w in words)
-        matches = list(re.finditer(pattern, code))
-        if matches:
-            m = matches[-1]
-            new_code = code[:m.end()] + e_tag + code[m.end():]
             return new_code + comment + eol, True
 
     return line_str, False
@@ -326,13 +381,16 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
     current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
     target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
 
-    # Search window around target_idx: [target_idx - 3, target_idx + 4]
-    lo = max(0, target_idx - 3)
-    hi = min(len(tf.lines), target_idx + 5)
+    # Search window around target_idx: [target_idx - 4, target_idx + 6]
+    lo = max(0, target_idx - 4)
+    hi = min(len(tf.lines), target_idx + 7)
     matched_idx = -1
     marked_success = False
 
-    # 1. First check if single line matches
+    b_tag = f"\\sioyekhlbegin[{type_char}]"
+    e_tag = f"\\sioyekhlend[{type_char}]"
+
+    # 1. First check if single line full match works (exact or whitespace-flexible)
     search_indices = [target_idx] + [i for i in range(lo, hi) if i != target_idx]
     for idx in search_indices:
         new_line, ok = try_mark_in_single_line(tf.lines[idx], text, type_char)
@@ -342,50 +400,80 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
             marked_success = True
             break
 
-    # 2. Multi-line spanning across 2 consecutive lines
-    if not marked_success and len(text.split()) >= 2:
-        words = text.split()
-        for idx in range(lo, min(hi, len(tf.lines) - 1)):
-            for split_pt in range(1, len(words)):
-                part1 = " ".join(words[:split_pt])
-                part2 = " ".join(words[split_pt:])
-                nl1, ok1 = try_mark_start_in_line(tf.lines[idx], part1, type_char)
-                nl2, ok2 = try_mark_end_in_line(tf.lines[idx + 1], part2, type_char)
-                if ok1 and ok2:
-                    tf.lines[idx] = nl1
-                    tf.lines[idx + 1] = nl2
-                    matched_idx = idx
-                    marked_success = True
-                    break
-            if marked_success:
-                break
-
-    # 3. Multi-line spanning across 3 or more lines (start words on line A, end words on line B)
-    if not marked_success and len(text.split()) >= 4:
-        words = text.split()
-        start_probe = " ".join(words[:min(4, len(words))])
-        end_probe = " ".join(words[-min(4, len(words)):])
-        for idx1 in range(lo, min(hi, len(tf.lines))):
-            nl1, ok1 = try_mark_start_in_line(tf.lines[idx1], start_probe, type_char)
-            if ok1:
-                for idx2 in range(idx1 + 1, hi):
-                    nl2, ok2 = try_mark_end_in_line(tf.lines[idx2], end_probe, type_char)
-                    if ok2:
-                        tf.lines[idx1] = nl1
-                        tf.lines[idx2] = nl2
-                        matched_idx = idx1
+    # 2. Robust probe matching (handles math, quotes, single-line & multi-line spans)
+    if not marked_success:
+        sp, ep, is_cjk = extract_probes(text)
+        if sp and ep:
+            # 2a. Same-line match: both start probe and end probe on the SAME line!
+            for idx in search_indices:
+                body, eol = strip_eol(tf.lines[idx])
+                code, comment = split_comment(body)
+                s_idx = find_start_in_line(code, sp, is_cjk)
+                if s_idx >= 0:
+                    e_idx = find_end_in_line(code, ep, is_cjk, text, start_offset=s_idx)
+                    if e_idx > s_idx:
+                        new_code = code[:s_idx] + b_tag + code[s_idx:e_idx] + e_tag + code[e_idx:]
+                        tf.lines[idx] = new_code + (comment if comment else "") + eol
+                        matched_idx = idx
                         marked_success = True
                         break
-                if marked_success:
-                    break
 
-    # 4. Fallback if text couldn't be precisely located in code
+            # 2b. Multi-line match: start probe on line A, end probe on line B (A < B)
+            if not marked_success:
+                found_a = -1
+                s_pos = -1
+                for idx in range(lo, hi):
+                    body, _ = strip_eol(tf.lines[idx])
+                    code, _ = split_comment(body)
+                    s = find_start_in_line(code, sp, is_cjk)
+                    if s >= 0:
+                        found_a = idx
+                        s_pos = s
+                        break
+
+                if found_a >= 0:
+                    found_b = -1
+                    e_pos = -1
+                    for idx in range(found_a + 1, hi):
+                        body, _ = strip_eol(tf.lines[idx])
+                        code, _ = split_comment(body)
+                        e = find_end_in_line(code, ep, is_cjk, text, start_offset=0)
+                        if e >= 0:
+                            found_b = idx
+                            e_pos = e
+                            break
+
+                    if found_b >= 0:
+                        # Insert start on line A
+                        body_a, eol_a = strip_eol(tf.lines[found_a])
+                        code_a, com_a = split_comment(body_a)
+                        new_code_a = code_a[:s_pos] + b_tag + code_a[s_pos:]
+                        tf.lines[found_a] = new_code_a + (com_a if com_a else "") + eol_a
+
+                        # Insert end on line B
+                        body_b, eol_b = strip_eol(tf.lines[found_b])
+                        code_b, com_b = split_comment(body_b)
+                        new_code_b = code_b[:e_pos] + e_tag + code_b[e_pos:]
+                        tf.lines[found_b] = new_code_b + (com_b if com_b else "") + eol_b
+
+                        matched_idx = found_a
+                        marked_success = True
+
+    # 3. Fallback: if exact boundaries couldn't be detected
     if not marked_success:
         safe_idx, _ = find_insert_line(tf.lines, target_idx)
         body, eol = strip_eol(tf.lines[safe_idx])
         code, comment = split_comment(body)
-        mark = f" \\sioyekhlbegin[{type_char}]\\sioyekhlend[{type_char}]"
-        tf.lines[safe_idx] = code.rstrip(" \t") + mark + (" " + comment if comment else "") + eol
+        stripped = code.strip()
+        if stripped:
+            # Wrap the whole line code safely
+            l_lead = len(code) - len(code.lstrip())
+            r_trail = len(code) - len(code.rstrip())
+            core = code[l_lead: len(code) - r_trail]
+            new_code = code[:l_lead] + b_tag + core + e_tag + code[len(code) - r_trail:]
+            tf.lines[safe_idx] = new_code + (comment if comment else "") + eol
+        else:
+            tf.lines[safe_idx] = b_tag + e_tag + eol
         matched_idx = safe_idx
         action_verb = "已嵌入高亮标记"
     else:
