@@ -2,6 +2,9 @@
 Automatically embed highlights directly into LaTeX source files
 for SyncTeX-enabled PDF documents.
 
+Highlights are rendered in the page margin as:
+    \sioyekhlmark[type]{snippet} -> [Highlight: snippet]
+
 Commands supported:
     python -m sioyek.embed_tex_annotation highlight SIOYEK LOCAL_DB SHARED_DB PDF RECT TYPE TEXT
     python -m sioyek.embed_tex_annotation delete_highlight SIOYEK LOCAL_DB SHARED_DB PDF RECT TYPE TEXT
@@ -36,8 +39,6 @@ HL_DEFINITION_LINES = [
     MARKER_HL_BEGIN,
     r"\makeatletter",
     r"\@ifpackageloaded{xcolor}{}{\@ifpackageloaded{color}{}{\usepackage{xcolor}}}",
-    r"\@ifpackageloaded{amssymb}{}{\usepackage{amssymb}}",
-    r"\@ifpackageloaded{graphicx}{}{\usepackage{graphicx}}",
     r"\colorlet{sioyek_a}{orange!85!black}",
     r"\colorlet{sioyek_b}{cyan!80!black}",
     r"\colorlet{sioyek_c}{green!70!black}",
@@ -59,33 +60,14 @@ HL_DEFINITION_LINES = [
     r"\newcommand{\sioyek@gethlcolor}[1]{%",
     r"  \@ifundefined{sioyekhlcolor@#1}{sioyek_a}{\csname sioyekhlcolor@#1\endcsname}%",
     r"}",
-    r"\providecommand{\sioyekhlbeginmark}{\raisebox{0.1ex}{\scalebox{0.65}{$\blacktriangleright$}}}",
-    r"\providecommand{\sioyekhlendmark}{\raisebox{0.1ex}{\scalebox{0.65}{$\blacktriangleleft$}}}",
-    r"\providecommand{\sioyekhlbegin}[1][a]{%",
-    r"  \ifsioyekhl%",
-    r"    \ifmmode%",
-    r"      {\color{\sioyek@gethlcolor{#1}}\raisebox{0.5ex}{\scalebox{0.6}{$\blacktriangleright$}}}%",
-    r"    \else%",
-    r"      \begingroup\color{\sioyek@gethlcolor{#1}}\textsuperscript{\sioyekhlbeginmark}\endgroup%",
-    r"    \fi%",
-    r"  \fi%",
-    r"}",
-    r"\providecommand{\sioyekhlend}[1][a]{%",
-    r"  \ifsioyekhl%",
-    r"    \ifmmode%",
-    r"      {\color{\sioyek@gethlcolor{#1}}\raisebox{0.5ex}{\scalebox{0.6}{$\blacktriangleleft$}}}%",
-    r"    \else%",
-    r"      \begingroup\color{\sioyek@gethlcolor{#1}}\textsuperscript{\sioyekhlendmark}\endgroup%",
-    r"    \fi%",
-    r"  \fi%",
-    r"}",
-    r"% Aliases & backwards-compatibility",
     r"\providecommand{\sioyekhlmark}[2][a]{%",
-    r"  \sioyekhlbegin[#1]#2\sioyekhlend[#1]%",
+    r"  \ifsioyekhl\marginpar{\raggedright\footnotesize\color{\sioyek@gethlcolor{#1}}\textbf{[Highlight:} #2\textbf{]}}\fi%",
     r"}",
     r"\providecommand{\sioyekhl}[2][a]{%",
-    r"  \sioyekhlbegin[#1]#2\sioyekhlend[#1]%",
+    r"  \sioyekhlmark[#1]{#2}%",
     r"}",
+    r"\providecommand{\sioyekhlbegin}[1][a]{}",
+    r"\providecommand{\sioyekhlend}[1][a]{}",
     r"\makeatother",
     MARKER_HL_END,
 ]
@@ -155,18 +137,18 @@ def commit_annot_files(texfiles, pdf_path, kind, description):
 
 
 def inject_hl_definition(tf):
-    # If definition block already exists, check if it needs upgrading to sioyekhlbegin / sioyekhlend
+    # If definition block already exists, check if it needs upgrading to marginpar sioyekhlmark
     for i, line in enumerate(tf.lines):
         if MARKER_HL_BEGIN in line:
             end_idx = -1
-            has_begin = False
+            has_marginpar_mark = False
             for j in range(i, len(tf.lines)):
-                if r"\sioyekhlbegin" in tf.lines[j]:
-                    has_begin = True
+                if r"\sioyekhlmark" in tf.lines[j] and r"\marginpar" in tf.lines[j] and r"[Highlight:" in tf.lines[j]:
+                    has_marginpar_mark = True
                 if MARKER_HL_END in tf.lines[j]:
                     end_idx = j
                     break
-            if has_begin:
+            if has_marginpar_mark:
                 return False
             if end_idx != -1:
                 nl = tf.newline
@@ -175,7 +157,7 @@ def inject_hl_definition(tf):
                 return True
             return False
         code, _ = split_comment(strip_eol(line)[0])
-        if r"\providecommand{\sioyekhlbegin}" in code:
+        if r"\providecommand{\sioyekhlmark}" in code and r"\marginpar" in code:
             return False
     begin, _ = find_document_bounds(tf.lines)
     if begin is None:
@@ -203,168 +185,93 @@ def parse_rect_or_pos(s):
 
 
 # ---------------------------------------------------------------------------
-# Highlight Logic
+# Highlight Snippet Formatting & Matching
 # ---------------------------------------------------------------------------
 
-def is_line_in_math_or_unsafe(state):
-    depth, math, stack, in_verb = state
-    if in_verb or math is not None:
-        return True
-    for env in stack:
-        env_b = env.rstrip("*")
-        if env_b in ("equation", "align", "gather", "multline", "figure", "table", "tabular", "tikzpicture"):
-            return True
-    return False
+def format_hl_snippet(selected_text, max_len=45):
+    r"""
+    Formats selected text into a concise snippet for the margin note:
+    - If <= max_len characters: returns sanitized text.
+    - If > max_len characters: extracts start words, \dots{}, end words.
+    """
+    text = " ".join(selected_text.split()).strip()
+    if not text:
+        return ""
 
+    def sanitize(s):
+        # Remove curly braces and backslashes to avoid broken macro syntax
+        s = s.replace("{", "").replace("}", "").replace("\\", "")
+        # Escape TeX specials
+        s = s.replace("%", r"\%").replace("&", r"\&").replace("#", r"\#").replace("_", r"\_").replace("$", r"\$")
+        return s.strip()
 
-def normalize_probe_regex(word):
-    r"""Builds a regex snippet that matches word with optional quotes/apostrophes."""
-    w_escaped = re.escape(word)
-    return r'(?:``|"|“|‘|`)?' + w_escaped + r"(?:''|\"|”|’|')?"
-
-
-def extract_probes(selected_text):
-    r"""Extracts robust start and end probe words/chars from selected text."""
-    text = selected_text.strip()
     has_cjk = bool(re.search(r'[\u4e00-\u9fa5]', text))
+
     if has_cjk:
-        cjk_chars = re.findall(r'[\u4e00-\u9fa5]', text)
-        start_probe = ''.join(cjk_chars[:min(4, len(cjk_chars))])
-        end_probe = ''.join(cjk_chars[-min(4, len(cjk_chars)):])
-        return start_probe, end_probe, True
+        if len(text) <= 25:
+            return sanitize(text)
+        head = text[:12]
+        tail = text[-12:]
+        return f"{sanitize(head)} \\dots{{}} {sanitize(tail)}"
+
+    if len(text) <= max_len:
+        return sanitize(text)
 
     words = text.split()
-    start_words = []
-    for w in words:
-        cw = re.sub(r'^[^\w]+|[^\w]+$', '', w)
-        if len(cw) >= 2 and re.search(r'[a-zA-Z0-9]', cw):
-            start_words.append(cw)
-        if len(start_words) >= 3:
-            break
-
-    # End probe: find last word with letters
-    last_word_idx = -1
-    for i in range(len(words) - 1, -1, -1):
-        cw = re.sub(r'^[^\w]+|[^\w]+$', '', words[i])
-        if (len(cw) >= 2 or cw in ('a', 'A', 'I')) and re.match(r'^[a-zA-Z]+$', cw):
-            if not any(cw.lower().startswith(p) for p in ['tau', 'alpha', 'beta', 'gamma']):
-                last_word_idx = i
-                break
-    if last_word_idx == -1:
-        end_words = [re.sub(r'^[^\w]+|[^\w]+$', '', w) for w in words[-min(3, len(words)):]]
+    if len(words) >= 6:
+        head = " ".join(words[:3])
+        tail = " ".join(words[-3:])
+        if len(head) > 22:
+            head = head[:20] + ".."
+        if len(tail) > 22:
+            tail = ".." + tail[-20:]
+        return f"{sanitize(head)} \\dots{{}} {sanitize(tail)}"
     else:
-        start_idx = max(0, last_word_idx - 2)
-        end_words = [re.sub(r'^[^\w]+|[^\w]+$', '', w) for w in words[start_idx : last_word_idx + 1]]
-    end_words = [w for w in end_words if w]
-
-    return start_words, end_words, False
+        head = text[:20]
+        tail = text[-20:]
+        return f"{sanitize(head)} \\dots{{}} {sanitize(tail)}"
 
 
-def find_start_in_line(code, start_probe, is_cjk):
-    r"""Returns the start character index of start_probe in code, or -1."""
-    if is_cjk:
-        m = re.search(re.escape(start_probe), code)
-        return m.start() if m else -1
-    parts = [normalize_probe_regex(w) for w in start_probe]
-    pat = r'\s+'.join(parts)
-    m = re.search(pat, code)
-    if m:
-        if code[:m.start()].endswith('\\'):
-            return -1
-        return m.start()
-    # Try fewer words if 3 didn't match
-    if len(start_probe) > 1:
-        parts = [normalize_probe_regex(w) for w in start_probe[:2]]
-        pat = r'\s+'.join(parts)
-        m = re.search(pat, code)
-        if m and not code[:m.start()].endswith('\\'):
-            return m.start()
-    return -1
-
-
-def find_end_in_line(code, end_probe, is_cjk, selected_text, start_offset=0):
-    r"""Returns the end character index of end_probe in code, or -1."""
-    sub_code = code[start_offset:]
-    abs_end = -1
-    if is_cjk:
-        matches = list(re.finditer(re.escape(end_probe), sub_code))
-        if matches:
-            m_end = matches[-1]
-            abs_end = start_offset + m_end.end()
-    else:
-        parts = [normalize_probe_regex(w) for w in end_probe]
-        pat = r'\s+'.join(parts)
-        matches = list(re.finditer(pat, sub_code))
-        if not matches and len(end_probe) > 1:
-            # Fallback to last 2 words of end probe
-            parts = [normalize_probe_regex(w) for w in end_probe[-2:]]
-            pat = r'\s+'.join(parts)
-            matches = list(re.finditer(pat, sub_code))
-        if matches:
-            m_end = matches[-1]
-            abs_end = start_offset + m_end.end()
-            # Align tail (formulas, punctuation)
-            last_word = end_probe[-1]
-            idx_in_pdf = selected_text.rfind(last_word)
-            pdf_tail = selected_text[idx_in_pdf + len(last_word):].strip() if idx_in_pdf >= 0 else ''
-            tail_code = code[abs_end:]
-            if pdf_tail:
-                last_char = pdf_tail[-1]
-                if last_char in '.!?,;:)]}"\'':
-                    p_idx = tail_code.find(last_char)
-                    if p_idx >= 0:
-                        abs_end += p_idx + 1
-                elif '$' in tail_code:
-                    first_dollar = tail_code.find('$')
-                    if first_dollar >= 0:
-                        second_dollar = tail_code.find('$', first_dollar + 1)
-                        if second_dollar >= 0:
-                            abs_end += second_dollar + 1
-    return abs_end
-
-
-def try_mark_in_single_line(line_str, text_to_wrap, type_char):
+def find_all_sioyekhlmarks_in_line(line):
     r"""
-    Tries to find text_to_wrap in line_str (code part only) and wrap with marks:
-    \sioyekhlbegin[type]text_to_wrap\sioyekhlend[type].
-    Returns (new_line_str, True) on success, or (line_str, False).
+    Finds all \sioyekhlmark[...]{...} and \sioyekhl[...]{...} calls in line,
+    correctly handling nested braces (such as \dots{}).
+    Returns list of (start_idx, end_idx_exclusive, opt_arg, body_arg).
     """
-    body, eol = strip_eol(line_str)
-    code, comment = split_comment(body)
-    if not code.strip():
-        return line_str, False
+    pattern = re.compile(r"\\sioyekhl(?:mark)?(?:\s*\[([^\]]*)\])?\s*\{")
+    results = []
+    pos = 0
+    while pos < len(line):
+        m = pattern.search(line, pos)
+        if not m:
+            break
+        open_brace_idx = m.end() - 1
+        depth = 1
+        i = open_brace_idx + 1
+        matched = False
+        while i < len(line):
+            c = line[i]
+            if c == "{" and (i == 0 or line[i - 1] != "\\"):
+                depth += 1
+            elif c == "}" and (i == 0 or line[i - 1] != "\\"):
+                depth -= 1
+                if depth == 0:
+                    start_idx = m.start()
+                    opt_arg = m.group(1) or "a"
+                    body_arg = line[open_brace_idx + 1:i]
+                    results.append((start_idx, i + 1, opt_arg, body_arg))
+                    pos = i + 1
+                    matched = True
+                    break
+            i += 1
+        if not matched:
+            break
+    return results
 
-    b_tag = f"\\sioyekhlbegin[{type_char}]"
-    e_tag = f"\\sioyekhlend[{type_char}]"
 
-    # Already marked?
-    if b_tag in code and e_tag in code:
-        return line_str, True
-
-    # 1. Exact match in code
-    idx = code.find(text_to_wrap)
-    if idx >= 0:
-        before = code[:idx]
-        if before.endswith("\\"):
-            return line_str, False
-        marked = f"{b_tag}{text_to_wrap}{e_tag}"
-        new_code = code[:idx] + marked + code[idx + len(text_to_wrap):]
-        return new_code + comment + eol, True
-
-    # 2. Whitespace-flexible regex match
-    words = [w for w in text_to_wrap.split() if w]
-    if len(words) > 1:
-        parts = [normalize_probe_regex(w) for w in words]
-        pattern = r"\s+".join(parts)
-        m = re.search(pattern, code)
-        if m:
-            matched_slice = m.group(0)
-            marked = f"{b_tag}{matched_slice}{e_tag}"
-            new_code = code[:m.start()] + marked + code[m.end():]
-            return new_code + comment + eol, True
-
-    return line_str, False
-
+# ---------------------------------------------------------------------------
+# Core Highlight Embedding & Deletion
+# ---------------------------------------------------------------------------
 
 def embed_highlight(pdf_path, rect_str, type_char, selected_text):
     if not has_synctex_data(pdf_path):
@@ -381,103 +288,23 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
     current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
     target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
 
-    # Search window around target_idx: [target_idx - 4, target_idx + 6]
-    lo = max(0, target_idx - 4)
-    hi = min(len(tf.lines), target_idx + 7)
-    matched_idx = -1
-    marked_success = False
+    safe_idx, moved_reason = find_insert_line(tf.lines, target_idx)
+    body, eol = strip_eol(tf.lines[safe_idx])
+    code, comment = split_comment(body)
 
-    b_tag = f"\\sioyekhlbegin[{type_char}]"
-    e_tag = f"\\sioyekhlend[{type_char}]"
+    snippet = format_hl_snippet(text)
+    macro = f"\\sioyekhlmark[{type_char}]{{{snippet}}}"
 
-    # 1. First check if single line full match works (exact or whitespace-flexible)
-    search_indices = [target_idx] + [i for i in range(lo, hi) if i != target_idx]
-    for idx in search_indices:
-        new_line, ok = try_mark_in_single_line(tf.lines[idx], text, type_char)
-        if ok:
-            tf.lines[idx] = new_line
-            matched_idx = idx
-            marked_success = True
-            break
+    # Check if this exact macro is already present
+    if macro in code:
+        log(f"embed_highlight: {macro} already present in {tex_path}:{safe_idx + 1}")
+        return f"高亮已存在 [{type_char}]：{os.path.basename(tex_path)}:{safe_idx + 1}"
 
-    # 2. Robust probe matching (handles math, quotes, single-line & multi-line spans)
-    if not marked_success:
-        sp, ep, is_cjk = extract_probes(text)
-        if sp and ep:
-            # 2a. Same-line match: both start probe and end probe on the SAME line!
-            for idx in search_indices:
-                body, eol = strip_eol(tf.lines[idx])
-                code, comment = split_comment(body)
-                s_idx = find_start_in_line(code, sp, is_cjk)
-                if s_idx >= 0:
-                    e_idx = find_end_in_line(code, ep, is_cjk, text, start_offset=s_idx)
-                    if e_idx > s_idx:
-                        new_code = code[:s_idx] + b_tag + code[s_idx:e_idx] + e_tag + code[e_idx:]
-                        tf.lines[idx] = new_code + (comment if comment else "") + eol
-                        matched_idx = idx
-                        marked_success = True
-                        break
-
-            # 2b. Multi-line match: start probe on line A, end probe on line B (A < B)
-            if not marked_success:
-                found_a = -1
-                s_pos = -1
-                for idx in range(lo, hi):
-                    body, _ = strip_eol(tf.lines[idx])
-                    code, _ = split_comment(body)
-                    s = find_start_in_line(code, sp, is_cjk)
-                    if s >= 0:
-                        found_a = idx
-                        s_pos = s
-                        break
-
-                if found_a >= 0:
-                    found_b = -1
-                    e_pos = -1
-                    for idx in range(found_a + 1, hi):
-                        body, _ = strip_eol(tf.lines[idx])
-                        code, _ = split_comment(body)
-                        e = find_end_in_line(code, ep, is_cjk, text, start_offset=0)
-                        if e >= 0:
-                            found_b = idx
-                            e_pos = e
-                            break
-
-                    if found_b >= 0:
-                        # Insert start on line A
-                        body_a, eol_a = strip_eol(tf.lines[found_a])
-                        code_a, com_a = split_comment(body_a)
-                        new_code_a = code_a[:s_pos] + b_tag + code_a[s_pos:]
-                        tf.lines[found_a] = new_code_a + (com_a if com_a else "") + eol_a
-
-                        # Insert end on line B
-                        body_b, eol_b = strip_eol(tf.lines[found_b])
-                        code_b, com_b = split_comment(body_b)
-                        new_code_b = code_b[:e_pos] + e_tag + code_b[e_pos:]
-                        tf.lines[found_b] = new_code_b + (com_b if com_b else "") + eol_b
-
-                        matched_idx = found_a
-                        marked_success = True
-
-    # 3. Fallback: if exact boundaries couldn't be detected
-    if not marked_success:
-        safe_idx, _ = find_insert_line(tf.lines, target_idx)
-        body, eol = strip_eol(tf.lines[safe_idx])
-        code, comment = split_comment(body)
-        stripped = code.strip()
-        if stripped:
-            # Wrap the whole line code safely
-            l_lead = len(code) - len(code.lstrip())
-            r_trail = len(code) - len(code.rstrip())
-            core = code[l_lead: len(code) - r_trail]
-            new_code = code[:l_lead] + b_tag + core + e_tag + code[len(code) - r_trail:]
-            tf.lines[safe_idx] = new_code + (comment if comment else "") + eol
-        else:
-            tf.lines[safe_idx] = b_tag + e_tag + eol
-        matched_idx = safe_idx
-        action_verb = "已嵌入高亮标记"
-    else:
-        action_verb = "已标记高亮源码"
+    # Insert macro before trailing comment
+    sep = "" if not code or code.endswith(" ") else " "
+    new_code = code + sep + macro
+    sep_com = " " if comment and not new_code.endswith(" ") else ""
+    tf.lines[safe_idx] = new_code + sep_com + comment + eol
 
     files_to_commit = [tf]
     root_path = find_root_file(tex_path, pdf_path)
@@ -489,14 +316,10 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
             if inject_hl_definition(root_tf):
                 files_to_commit.append(root_tf)
 
-    desc = f"高亮标记 [{type_char}] @ {os.path.basename(tex_path)}:{matched_idx + 1}: {text[:30]}"
+    desc = f"页边高亮 [{type_char}] @ {os.path.basename(tex_path)}:{safe_idx + 1}: {snippet[:30]}"
     commit_annot_files(files_to_commit, pdf_path, "highlight", desc)
-    return f"{action_verb} [{type_char}]：{os.path.basename(tex_path)}:{matched_idx + 1}（等待编译）"
+    return f"已嵌入页边高亮 [{type_char}]：{os.path.basename(tex_path)}:{safe_idx + 1}（等待编译）"
 
-
-# ---------------------------------------------------------------------------
-# Deletion & Undo
-# ---------------------------------------------------------------------------
 
 def delete_highlight(pdf_path, rect_str, type_char, selected_text):
     if not has_synctex_data(pdf_path):
@@ -508,55 +331,69 @@ def delete_highlight(pdf_path, rect_str, type_char, selected_text):
     current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
     target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
 
-    lo = max(0, target_idx - 5)
-    hi = min(len(tf.lines), target_idx + 6)
+    # Search window around target_idx
+    lo = max(0, target_idx - 8)
+    hi = min(len(tf.lines), target_idx + 10)
+    search_indices = [target_idx] + [i for i in range(lo, hi) if i != target_idx]
+
+    snippet = format_hl_snippet(selected_text) if selected_text else ""
+    probe_words = [w for w in re.findall(r"\w+", selected_text.lower()) if len(w) >= 3] if selected_text else []
+
+    matched_idx = -1
     modified = False
 
-    # 1. Look for \sioyekhlbegin and \sioyekhlend on a single line
-    for idx in range(lo, hi):
-        line = tf.lines[idx]
-        if r"\sioyekhlbegin" in line and r"\sioyekhlend" in line:
-            new_line = re.sub(r"\\sioyekhlbegin(?:\[[^\]]*\])?", "", line)
-            new_line = re.sub(r"\\sioyekhlend(?:\[[^\]]*\])?", "", new_line)
-            if new_line != line:
-                tf.lines[idx] = new_line
-                modified = True
-                break
-
-    # If not on same line, look for multi-line begin/end pair
-    if not modified:
-        begin_idx = -1
-        end_idx = -1
-        for idx in range(lo, hi):
-            if r"\sioyekhlbegin" in tf.lines[idx] and begin_idx == -1:
-                begin_idx = idx
-            if r"\sioyekhlend" in tf.lines[idx] and end_idx == -1:
-                end_idx = idx
-        if begin_idx != -1 and end_idx != -1 and begin_idx <= end_idx:
-            tf.lines[begin_idx] = re.sub(r"\\sioyekhlbegin(?:\[[^\]]*\])?", "", tf.lines[begin_idx])
-            tf.lines[end_idx] = re.sub(r"\\sioyekhlend(?:\[[^\]]*\])?", "", tf.lines[end_idx])
-            modified = True
-
-    # 2. Look for legacy \sioyekhl[type]{...} or \sioyekhlmark[type]{...}
-    if not modified:
-        for idx in range(lo, hi):
+    # 1. Match by text/snippet similarity
+    if snippet or probe_words:
+        for idx in search_indices:
             line = tf.lines[idx]
-            m = re.search(r"\\sioyekhl(?:\[[^\]]*\])?\{([^{}]*)\}", line)
-            if m:
-                content = m.group(1)
-                tf.lines[idx] = line[:m.start()] + content + line[m.end():]
-                modified = True
+            marks = find_all_sioyekhlmarks_in_line(line)
+            for s, e, opt, body in marks:
+                body_lower = body.lower()
+                text_match = (snippet and snippet in body) or (probe_words and any(pw in body_lower for pw in probe_words))
+                if text_match:
+                    # Remove mark from line
+                    while s > 0 and line[s - 1] in (" ", "\t"):
+                        s -= 1
+                    tf.lines[idx] = line[:s] + line[e:]
+                    matched_idx = idx
+                    modified = True
+                    break
+            if modified:
                 break
-            m2 = re.search(r"\\sioyekhlmark(?:\[[^\]]*\])?\{[^{}]*\}", line)
-            if m2:
-                tf.lines[idx] = line[:m2.start()].rstrip(" \t") + line[m2.end():]
-                modified = True
+
+    # 2. Match by type_char or closest mark if text match was not conclusive
+    if not modified:
+        for idx in search_indices:
+            line = tf.lines[idx]
+            marks = find_all_sioyekhlmarks_in_line(line)
+            for s, e, opt, body in marks:
+                if not type_char or opt == type_char:
+                    while s > 0 and line[s - 1] in (" ", "\t"):
+                        s -= 1
+                    tf.lines[idx] = line[:s] + line[e:]
+                    matched_idx = idx
+                    modified = True
+                    break
+            if modified:
                 break
+
+    # 3. Clean up legacy \sioyekhlbegin / \sioyekhlend if present
+    if not modified:
+        for idx in search_indices:
+            line = tf.lines[idx]
+            if r"\sioyekhlbegin" in line or r"\sioyekhlend" in line:
+                new_line = re.sub(r"\\sioyekhlbegin(?:\[[^\]]*\])?", "", line)
+                new_line = re.sub(r"\\sioyekhlend(?:\[[^\]]*\])?", "", new_line)
+                if new_line != line:
+                    tf.lines[idx] = new_line
+                    matched_idx = idx
+                    modified = True
+                    break
 
     if modified:
-        desc = f"删除高亮标记 @ {os.path.basename(tex_path)}:{target_idx + 1}"
+        desc = f"删除页边高亮 @ {os.path.basename(tex_path)}:{matched_idx + 1}"
         commit_annot_files([tf], pdf_path, "highlight", desc)
-        return f"已从 {os.path.basename(tex_path)}:{target_idx + 1} 移除高亮标记（等待编译）"
+        return f"已从 {os.path.basename(tex_path)}:{matched_idx + 1} 移除高亮标记（等待编译）"
     return None
 
 
