@@ -781,7 +781,7 @@ class OpenDocumentEmbeddedFromCurrentPathCommand : public Command {
 
 class CopyCommand : public Command {
 	void perform(MainWidget* widget) {
-		if (widget->copy_latex_source_if_available()) {
+		if (widget->selected_text.empty() && widget->copy_latex_source_if_available()) {
 			return;
 		}
 		copy_to_clipboard(widget->selected_text);
@@ -789,6 +789,19 @@ class CopyCommand : public Command {
 
 	std::string get_name() {
 		return "copy";
+	}
+};
+
+class CopyLatexSourceCommand : public Command {
+	void perform(MainWidget* widget) {
+		if (widget->copy_latex_source_if_available()) {
+			return;
+		}
+		copy_to_clipboard(widget->selected_text);
+	}
+
+	std::string get_name() {
+		return "copy_latex_source";
 	}
 };
 
@@ -2305,6 +2318,7 @@ CommandManager::CommandManager(ConfigManager* config_manager) {
 	new_commands["open_document_embedded"] = []() {return std::make_unique< OpenDocumentEmbeddedCommand>(); };
 	new_commands["open_document_embedded_from_current_path"] = []() {return std::make_unique< OpenDocumentEmbeddedFromCurrentPathCommand>(); };
 	new_commands["copy"] = []() {return std::make_unique< CopyCommand>(); };
+	new_commands["copy_latex_source"] = []() {return std::make_unique< CopyLatexSourceCommand>(); };
 	new_commands["toggle_fullscreen"] = []() {return std::make_unique< ToggleFullscreenCommand>(); };
 	new_commands["toggle_one_window"] = []() {return std::make_unique< ToggleOneWindowCommand>(); };
 	new_commands["toggle_highlight"] = []() {return std::make_unique< ToggleHighlightCommand>(); };
