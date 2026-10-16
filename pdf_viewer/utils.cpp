@@ -898,6 +898,7 @@ void run_command(std::wstring command, QStringList parameters, bool wait){
 	}
 	else {
 		process->startDetached(qcommand, qparameters);
+		process->deleteLater();
 	}
 #endif
 

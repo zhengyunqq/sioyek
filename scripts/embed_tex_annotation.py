@@ -164,18 +164,16 @@ def inject_hl_definition(tf):
     for i, line in enumerate(tf.lines):
         if MARKER_HL_BEGIN in line:
             end_idx = -1
-            has_all_macros = False
             for j in range(i, len(tf.lines)):
-                if (r"\sioyekhlbeginmark" in tf.lines[j] and
-                    r"\sioyekhlmark" in tf.lines[j] and
-                    (r"\marginnote" in tf.lines[j] or r"\marginpar" in tf.lines[j])):
-                    has_all_macros = True
                 if MARKER_HL_END in tf.lines[j]:
                     end_idx = j
                     break
-            if has_all_macros:
-                return False
             if end_idx != -1:
+                block_str = "".join(tf.lines[i:end_idx + 1])
+                if (r"\sioyekhlbeginmark" in block_str and
+                    r"\sioyekhlmark" in block_str and
+                    r"\marginnote" in block_str):
+                    return False
                 nl = tf.newline
                 block = [l + nl for l in HL_DEFINITION_LINES]
                 tf.lines[i:end_idx + 1] = block
@@ -225,6 +223,7 @@ def format_hl_snippet(selected_text, max_len=45):
 
     def sanitize(s):
         s = s.replace("{", "").replace("}", "").replace("\\", "")
+        s = s.replace("^", r"\^{}").replace("~", r"\~{}")
         s = s.replace("%", r"\%").replace("&", r"\&").replace("#", r"\#").replace("_", r"\_").replace("$", r"\$")
         return s.strip()
 
@@ -610,7 +609,9 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
     root_path = find_root_file(tex_path, pdf_path)
     if root_path:
         if os.path.normpath(root_path) == os.path.normpath(tex_path):
-            inject_hl_definition(tf)
+            old_len = len(tf.lines)
+            if inject_hl_definition(tf):
+                matched_idx += len(tf.lines) - old_len
         else:
             root_tf = TexFile(root_path)
             if inject_hl_definition(root_tf):
@@ -619,6 +620,137 @@ def embed_highlight(pdf_path, rect_str, type_char, selected_text):
     desc = f"高亮标记 [{type_char}] @ {os.path.basename(tex_path)}:{matched_idx + 1}: {snippet[:30]}"
     commit_annot_files(files_to_commit, pdf_path, "highlight", desc)
     return f"已标记高亮与页边注 [{type_char}]：{os.path.basename(tex_path)}:{matched_idx + 1}（等待编译）"
+
+
+def _find_paired_begin_end(lines, lo, hi, best_line_idx, mark_start_pos, target_type):
+    """
+    Find the (line_idx, start_col, end_col) of the \\sioyekhlbegin and \\sioyekhlend
+    paired with a \\sioyekhlmark located at (best_line_idx, mark_start_pos).
+    Respects boundaries of any earlier \\sioyekhlmark so adjacent highlights never collide.
+    """
+    pat_b = re.compile(r"\\sioyekhlbegin\[" + re.escape(target_type) + r"\]") if target_type else re.compile(r"\\sioyekhlbegin(?:\[[^\]]*\])?")
+    pat_e = re.compile(r"\\sioyekhlend\[" + re.escape(target_type) + r"\]") if target_type else re.compile(r"\\sioyekhlend(?:\[[^\]]*\])?")
+
+    def last_mark_end_before(line_str, limit_pos=None):
+        marks = find_all_sioyekhlmarks_in_line(line_str)
+        ends = [0]
+        for ms, me, _, _ in marks:
+            if limit_pos is None or me <= limit_pos:
+                ends.append(me)
+        return max(ends)
+
+    end_loc = None
+    # 1. Search for \sioyekhlend on best_line_idx before mark_start_pos
+    line_str = lines[best_line_idx]
+    prev_m_end = last_mark_end_before(line_str, mark_start_pos)
+    matches_e = list(pat_e.finditer(line_str, prev_m_end, mark_start_pos))
+    if matches_e:
+        m = matches_e[-1]
+        end_loc = (best_line_idx, m.start(), m.end())
+    elif prev_m_end == 0:
+        for idx in range(best_line_idx - 1, lo - 1, -1):
+            l_str = lines[idx]
+            p_end = last_mark_end_before(l_str, None)
+            matches_e = list(pat_e.finditer(l_str, p_end))
+            if matches_e:
+                m = matches_e[-1]
+                end_loc = (idx, m.start(), m.end())
+                break
+            if p_end > 0:
+                break
+
+    # 2. Search for \sioyekhlbegin at or before end_loc (or mark_start_pos)
+    bound_idx = end_loc[0] if end_loc is not None else best_line_idx
+    bound_pos = end_loc[1] if end_loc is not None else mark_start_pos
+
+    begin_loc = None
+    b_line_str = lines[bound_idx]
+    prev_m_end_b = last_mark_end_before(b_line_str, bound_pos)
+    matches_b = list(pat_b.finditer(b_line_str, prev_m_end_b, bound_pos))
+    if matches_b:
+        m = matches_b[-1]
+        begin_loc = (bound_idx, m.start(), m.end())
+    elif prev_m_end_b == 0:
+        for idx in range(bound_idx - 1, lo - 1, -1):
+            l_str = lines[idx]
+            p_end = last_mark_end_before(l_str, None)
+            matches_b = list(pat_b.finditer(l_str, p_end))
+            if matches_b:
+                m = matches_b[-1]
+                begin_loc = (idx, m.start(), m.end())
+                break
+            if p_end > 0:
+                break
+
+    return begin_loc, end_loc
+
+
+def retype_highlight(pdf_path, rect_str, old_type, selected_text, new_type):
+    if not has_synctex_data(pdf_path):
+        return None
+    if old_type == new_type:
+        return None
+
+    page, rect = parse_rect_or_pos(rect_str)
+    tex_path, synctex_line = resolve_source(pdf_path, page, rect)
+    tf = TexFile(tex_path)
+    current_line = map_stale_line(tex_path, synctex_line, pdf_path, tf.lines)
+    target_idx = max(0, min(len(tf.lines) - 1, current_line - 1))
+
+    lo = max(0, target_idx - 8)
+    hi = min(len(tf.lines), target_idx + 10)
+    search_indices = [target_idx] + [i for i in range(lo, hi) if i != target_idx]
+
+    snippet = format_hl_snippet(selected_text) if selected_text else ""
+    probe_words = [w for w in re.findall(r"\w+", selected_text.lower()) if len(w) >= 3] if selected_text else []
+
+    best_mark = None
+    best_score = 0.0
+    best_line_idx = -1
+
+    for idx in search_indices:
+        line = tf.lines[idx]
+        marks = find_all_sioyekhlmarks_in_line(line)
+        for s, e, opt, body in marks:
+            body_lower = body.lower()
+            text_match = bool((snippet and snippet in body) or (probe_words and any(pw in body_lower for pw in probe_words)))
+            type_match = bool(old_type and opt == old_type)
+            if text_match and type_match:
+                score = 3.0
+            elif text_match:
+                score = 2.0
+            elif type_match:
+                score = 1.0
+            else:
+                score = 0.0
+            if score > 0 and idx == target_idx:
+                score += 0.5
+            if score > best_score:
+                best_score = score
+                best_mark = (s, e, opt, body)
+                best_line_idx = idx
+
+    if best_mark is None:
+        return embed_highlight(pdf_path, rect_str, new_type, selected_text)
+
+    s, e, opt, body = best_mark
+    actual_old_type = opt or old_type
+    begin_loc, end_loc = _find_paired_begin_end(tf.lines, lo, hi, best_line_idx, s, actual_old_type)
+
+    # Apply replacements from bottom-right to top-left so character offsets stay valid
+    edits = [(best_line_idx, s, e, f"\\sioyekhlmark[{new_type}]{{{body}}}")]
+    if end_loc is not None:
+        edits.append((end_loc[0], end_loc[1], end_loc[2], f"\\sioyekhlend[{new_type}]"))
+    if begin_loc is not None:
+        edits.append((begin_loc[0], begin_loc[1], begin_loc[2], f"\\sioyekhlbegin[{new_type}]"))
+
+    for l_idx, c_start, c_end, rep in sorted(edits, key=lambda x: (x[0], x[1]), reverse=True):
+        cur_line = tf.lines[l_idx]
+        tf.lines[l_idx] = cur_line[:c_start] + rep + cur_line[c_end:]
+
+    desc = f"更新高亮类型 [{actual_old_type}->{new_type}] @ {os.path.basename(tex_path)}:{best_line_idx + 1}"
+    commit_annot_files([tf], pdf_path, "highlight", desc)
+    return f"已更新高亮类型 [{actual_old_type}->{new_type}]：{os.path.basename(tex_path)}:{best_line_idx + 1}（等待编译）"
 
 
 def delete_highlight(pdf_path, rect_str, type_char, selected_text):
@@ -643,7 +775,7 @@ def delete_highlight(pdf_path, rect_str, type_char, selected_text):
     matched_idx = -1
     modified = False
 
-    # 1. Remove \sioyekhlmark matching snippet/type
+    # 1. Find \sioyekhlmark matching snippet/type
     best_mark = None
     best_score = 0.0
     best_line_idx = -1
@@ -674,46 +806,59 @@ def delete_highlight(pdf_path, rect_str, type_char, selected_text):
 
     if best_mark is not None:
         s, e, opt, body = best_mark
-        deleted_type = opt
+        deleted_type = opt or type_char
+        begin_loc, end_loc = _find_paired_begin_end(tf.lines, lo, hi, best_line_idx, s, deleted_type)
+        if begin_loc is None and end_loc is None and deleted_type:
+            begin_loc, end_loc = _find_paired_begin_end(tf.lines, lo, hi, best_line_idx, s, None)
+
         line = tf.lines[best_line_idx]
-        while s > 0 and line[s - 1] in (" ", "\t"):
-            s -= 1
-        tf.lines[best_line_idx] = line[:s] + line[e:]
+        s_trim = s
+        while s_trim > 0 and line[s_trim - 1] in (" ", "\t"):
+            s_trim -= 1
+        edits = [(best_line_idx, s_trim, e)]
+        if end_loc is not None:
+            edits.append(end_loc)
+        if begin_loc is not None:
+            edits.append(begin_loc)
+
+        for l_idx, c_start, c_end in sorted(edits, key=lambda x: (x[0], x[1]), reverse=True):
+            cur_line = tf.lines[l_idx]
+            tf.lines[l_idx] = cur_line[:c_start] + cur_line[c_end:]
         matched_idx = best_line_idx
         modified = True
+    else:
+        # Fallback for legacy highlights without \sioyekhlmark
+        target_type = deleted_type or type_char
+        pat_begin_typed = re.compile(r"\\sioyekhlbegin\[" + re.escape(target_type) + r"\]") if target_type else None
+        pat_end_typed = re.compile(r"\\sioyekhlend\[" + re.escape(target_type) + r"\]") if target_type else None
 
-    # 2. Remove \sioyekhlbegin and \sioyekhlend tags
-    target_type = deleted_type or type_char
-    pat_begin_typed = re.compile(r"\\sioyekhlbegin\[" + re.escape(target_type) + r"\]") if target_type else None
-    pat_end_typed = re.compile(r"\\sioyekhlend\[" + re.escape(target_type) + r"\]") if target_type else None
+        pat_begin_gen = re.compile(r"\\sioyekhlbegin(?:\[[^\]]*\])?")
+        pat_end_gen = re.compile(r"\\sioyekhlend(?:\[[^\]]*\])?")
 
-    pat_begin_gen = re.compile(r"\\sioyekhlbegin(?:\[[^\]]*\])?")
-    pat_end_gen = re.compile(r"\\sioyekhlend(?:\[[^\]]*\])?")
+        has_typed_begin = bool(pat_begin_typed and any(pat_begin_typed.search(tf.lines[i]) for i in range(lo, hi)))
+        has_typed_end = bool(pat_end_typed and any(pat_end_typed.search(tf.lines[i]) for i in range(lo, hi)))
 
-    has_typed_begin = bool(pat_begin_typed and any(pat_begin_typed.search(tf.lines[i]) for i in range(lo, hi)))
-    has_typed_end = bool(pat_end_typed and any(pat_end_typed.search(tf.lines[i]) for i in range(lo, hi)))
+        pat_b = pat_begin_typed if has_typed_begin else pat_begin_gen
+        pat_e = pat_end_typed if has_typed_end else pat_end_gen
 
-    pat_b = pat_begin_typed if has_typed_begin else pat_begin_gen
-    pat_e = pat_end_typed if has_typed_end else pat_end_gen
+        b_removed = False
+        e_removed = False
 
-    b_removed = False
-    e_removed = False
-
-    for idx in range(lo, hi):
-        line = tf.lines[idx]
-        new_line = line
-        if not b_removed and pat_b.search(new_line):
-            new_line = pat_b.sub("", new_line, count=1)
-            b_removed = True
-        if not e_removed and pat_e.search(new_line):
-            new_line = pat_e.sub("", new_line, count=1)
-            e_removed = True
-        if new_line != line:
-            tf.lines[idx] = new_line
-            matched_idx = idx
-            modified = True
-        if b_removed and e_removed:
-            break
+        for idx in search_indices:
+            line = tf.lines[idx]
+            new_line = line
+            if not b_removed and pat_b.search(new_line):
+                new_line = pat_b.sub("", new_line, count=1)
+                b_removed = True
+            if not e_removed and pat_e.search(new_line):
+                new_line = pat_e.sub("", new_line, count=1)
+                e_removed = True
+            if new_line != line:
+                tf.lines[idx] = new_line
+                matched_idx = idx
+                modified = True
+            if b_removed and e_removed:
+                break
 
     if modified:
         desc = f"删除高亮标记 @ {os.path.basename(tex_path)}:{matched_idx + 1}"
@@ -791,6 +936,13 @@ def main():
             type_char = clean_path(sys.argv[7]) or "a"
             selected_text = sys.argv[8]
             msg = delete_highlight(pdf_path, rect_str, type_char, selected_text)
+
+        elif action == "retype_highlight" and len(sys.argv) >= 10:
+            rect_str = clean_path(sys.argv[6])
+            old_type = clean_path(sys.argv[7]) or "a"
+            selected_text = sys.argv[8]
+            new_type = clean_path(sys.argv[9]) or "a"
+            msg = retype_highlight(pdf_path, rect_str, old_type, selected_text, new_type)
 
         elif action == "undo":
             target_kind = clean_path(sys.argv[6]) if len(sys.argv) > 6 else None

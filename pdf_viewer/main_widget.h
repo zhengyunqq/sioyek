@@ -227,6 +227,7 @@ public:
 
 	void trigger_embed_highlight_in_tex(char symbol);
 	void trigger_delete_highlight_in_tex(const Highlight& hl);
+	void trigger_retype_highlight_in_tex(const Highlight& old_hl, char new_symbol);
 
 	MainWidget(
 		fz_context* mupdf_context,

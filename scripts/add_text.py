@@ -1,4 +1,5 @@
 import sys
+import fitz
 from .sioyek import Sioyek, clean_path
 from collections import defaultdict
 

@@ -44,10 +44,11 @@ DEFINITION_LINES = [
     MARKER_BEGIN,
     r"\makeatletter",
     r"\@ifpackageloaded{xcolor}{}{\@ifpackageloaded{color}{}{\usepackage{xcolor}}}",
+    r"\@ifpackageloaded{marginnote}{}{\usepackage{marginnote}}",
     r"\makeatother",
     r"\newif\ifstudynotes \studynotestrue",
     r"% \studynotesfalse   % uncomment to hide ALL study notes",
-    r"\providecommand{\studynote}[1]{\ifstudynotes\marginpar{\raggedright\footnotesize\color{blue}\textbf{Note:} #1}\fi}",
+    r"\providecommand{\studynote}[1]{\ifstudynotes\marginnote{\raggedright\footnotesize\color{blue}\textbf{Note:} #1}\fi}",
     MARKER_END,
 ]
 
@@ -621,7 +622,23 @@ def definition_present(tf):
 
 
 def inject_definition(tf):
-    """Inserts the macro block before \\begin{document}; returns True if modified."""
+    """Inserts or upgrades the macro block before \\begin{document}; returns True if modified."""
+    for i, line in enumerate(tf.lines):
+        if MARKER_BEGIN in line:
+            end_idx = -1
+            for j in range(i, len(tf.lines)):
+                if MARKER_END in tf.lines[j]:
+                    end_idx = j
+                    break
+            if end_idx != -1:
+                block_str = "".join(tf.lines[i:end_idx + 1])
+                if r"\marginnote" in block_str and r"\studynote" in block_str:
+                    return False
+                nl = tf.newline
+                block = [l + nl for l in DEFINITION_LINES]
+                tf.lines[i:end_idx + 1] = block
+                return True
+            return False
     if definition_present(tf):
         return False
     begin, _ = find_document_bounds(tf.lines)
@@ -648,6 +665,19 @@ def synctex_mtime(pdf_path):
     return None
 
 
+def load_all_histories():
+    """Loads both study_note_history.json and annotation_history.json sorted chronologically."""
+    combined = list(load_history())
+    annot_hist_path = os.path.expanduser("~/.config/sioyek/annotation_history.json")
+    try:
+        with open(annot_hist_path, "r", encoding="utf-8") as f:
+            combined.extend(json.load(f))
+    except Exception:
+        pass
+    combined.sort(key=lambda e: e.get("time", ""))
+    return combined
+
+
 def map_stale_line(tex_path, line_1based, pdf_path, current_lines):
     """
     SyncTeX line numbers refer to the source as it was at compile time. If we already wrote
@@ -663,7 +693,7 @@ def map_stale_line(tex_path, line_1based, pdf_path, current_lines):
     except OSError:
         return line_1based
     compile_backup = None
-    for entry in load_history():
+    for entry in load_all_histories():
         try:
             t = datetime.datetime.fromisoformat(entry.get("time", "")).timestamp()
         except Exception:
@@ -773,8 +803,9 @@ class NoteTarget:
         shift = 0
         if self.root_path:
             if os.path.normpath(self.root_path) == os.path.normpath(self.tex_path):
+                old_len = len(self.tf.lines)
                 if inject_definition(self.tf):
-                    shift = len(DEFINITION_LINES)
+                    shift = len(self.tf.lines) - old_len
             else:
                 root_tf = TexFile(self.root_path)
                 if inject_definition(root_tf):

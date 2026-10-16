@@ -1430,9 +1430,9 @@ void MainWidget::handle_left_click(WindowPos click_pos, bool down, bool is_shift
 				selected_rectangle.x1 = rect_select_end.value().x;
 				selected_rectangle.y1 = rect_select_end.value().y;
 
-				if (fabs(selected_rectangle.x1 - selected_rectangle.x0) < 10 && fabs(selected_rectangle.y1 - selected_rectangle.y0) < 10) {
-					selected_rectangle.x1 = selected_rectangle.x0 + 150;
-					selected_rectangle.y1 = selected_rectangle.y0 + 30;
+				if (fabs(selected_rectangle.x1 - selected_rectangle.x0) < 4 && fabs(selected_rectangle.y1 - selected_rectangle.y0) < 4) {
+					selected_rectangle.x1 = selected_rectangle.x0 + 2;
+					selected_rectangle.y1 = selected_rectangle.y0 + 2;
 				}
 				opengl_widget->set_selected_rectangle(selected_rectangle);
 
@@ -4340,10 +4340,9 @@ void MainWidget::handle_add_highlight(char symbol) {
 	}
 	else if (selected_highlight_index != -1) {
 		Highlight new_highlight = main_document_view->get_highlight_with_index(selected_highlight_index);
-		trigger_delete_highlight_in_tex(new_highlight);
+		trigger_retype_highlight_in_tex(new_highlight, symbol);
 		main_document_view->delete_highlight_with_index(selected_highlight_index);
 		main_document_view->add_highlight(new_highlight.selection_begin, new_highlight.selection_end, symbol);
-		trigger_embed_highlight_in_tex(symbol);
 		selected_highlight_index = -1;
 	}
 }
@@ -4378,6 +4377,7 @@ void MainWidget::handle_goto_highlight() {
 		this,
 			[&](Highlight* hl) {
 			if (hl) {
+				trigger_delete_highlight_in_tex(*hl);
 				main_document_view->delete_highlight(*hl);
 			}
 		}));
@@ -4439,6 +4439,9 @@ void MainWidget::trigger_embed_highlight_in_tex(char symbol) {
 		for (const auto& r : char_rects) {
 			auto p0 = doc()->absolute_to_page_pos({ r.x0, r.y0 });
 			auto p1 = doc()->absolute_to_page_pos({ r.x1, r.y1 });
+			if (p0.page != page || p1.page != page) {
+				continue;
+			}
 			min_x = std::min({ min_x, p0.x, p1.x });
 			max_x = std::max({ max_x, p0.x, p1.x });
 			min_y = std::min({ min_y, p0.y, p1.y });
@@ -4448,10 +4451,15 @@ void MainWidget::trigger_embed_highlight_in_tex(char symbol) {
 		auto pt1 = doc()->absolute_to_page_pos(selection_begin);
 		auto pt2 = doc()->absolute_to_page_pos(selection_end);
 		page = pt1.page;
-		min_x = std::min(pt1.x, pt2.x);
-		max_x = std::max(pt1.x, pt2.x);
-		min_y = std::min(pt1.y, pt2.y);
-		max_y = std::max(pt1.y, pt2.y);
+		if (pt2.page == pt1.page) {
+			min_x = std::min(pt1.x, pt2.x);
+			max_x = std::max(pt1.x, pt2.x);
+			min_y = std::min(pt1.y, pt2.y);
+			max_y = std::max(pt1.y, pt2.y);
+		} else {
+			min_x = max_x = pt1.x;
+			min_y = max_y = pt1.y;
+		}
 	}
 
 	QString sioyek_path = QCoreApplication::applicationFilePath();
@@ -4493,10 +4501,13 @@ void MainWidget::trigger_delete_highlight_in_tex(const Highlight& hl) {
 	auto pt1 = doc()->absolute_to_page_pos(hl.selection_begin);
 	auto pt2 = doc()->absolute_to_page_pos(hl.selection_end);
 	int page = pt1.page;
-	float min_x = std::min(pt1.x, pt2.x);
-	float max_x = std::max(pt1.x, pt2.x);
-	float min_y = std::min(pt1.y, pt2.y);
-	float max_y = std::max(pt1.y, pt2.y);
+	float min_x = pt1.x, max_x = pt1.x, min_y = pt1.y, max_y = pt1.y;
+	if (pt2.page == pt1.page) {
+		min_x = std::min(pt1.x, pt2.x);
+		max_x = std::max(pt1.x, pt2.x);
+		min_y = std::min(pt1.y, pt2.y);
+		max_y = std::max(pt1.y, pt2.y);
+	}
 
 	QString sioyek_path = QCoreApplication::applicationFilePath();
 	QString local_db = QString::fromStdWString(local_database_file_path.get_path());
@@ -4515,6 +4526,55 @@ void MainWidget::trigger_delete_highlight_in_tex(const Highlight& hl) {
 	     << rect_str
 	     << sym_str
 	     << text_str;
+
+	run_command(L"python", args, false);
+}
+
+void MainWidget::trigger_retype_highlight_in_tex(const Highlight& old_hl, char new_symbol) {
+	if (!main_document_view || !doc()) {
+		return;
+	}
+	std::wstring docpath = doc()->get_path();
+	if (docpath.empty()) {
+		return;
+	}
+	QString qdocpath = QString::fromStdWString(docpath);
+	QString synctex_gz = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex.gz";
+	QString synctex_plain = qdocpath.left(qdocpath.lastIndexOf('.')) + ".synctex";
+	if (!QFile::exists(synctex_gz) && !QFile::exists(synctex_plain)) {
+		return;
+	}
+
+	auto pt1 = doc()->absolute_to_page_pos(old_hl.selection_begin);
+	auto pt2 = doc()->absolute_to_page_pos(old_hl.selection_end);
+	int page = pt1.page;
+	float min_x = pt1.x, max_x = pt1.x, min_y = pt1.y, max_y = pt1.y;
+	if (pt2.page == pt1.page) {
+		min_x = std::min(pt1.x, pt2.x);
+		max_x = std::max(pt1.x, pt2.x);
+		min_y = std::min(pt1.y, pt2.y);
+		max_y = std::max(pt1.y, pt2.y);
+	}
+
+	QString sioyek_path = QCoreApplication::applicationFilePath();
+	QString local_db = QString::fromStdWString(local_database_file_path.get_path());
+	QString shared_db = QString::fromStdWString(global_database_file_path.get_path());
+	QString rect_str = QString("%1,%2,%3,%4,%5").arg(page).arg(min_x, 0, 'f', 2).arg(min_y, 0, 'f', 2).arg(max_x, 0, 'f', 2).arg(max_y, 0, 'f', 2);
+	QString old_sym_str = QString(QChar(old_hl.type));
+	QString new_sym_str = QString(QChar(new_symbol));
+	QString text_str = QString::fromStdWString(old_hl.description);
+
+	QStringList args;
+	args << "-m" << "sioyek.embed_tex_annotation"
+	     << "retype_highlight"
+	     << sioyek_path
+	     << local_db
+	     << shared_db
+	     << qdocpath
+	     << rect_str
+	     << old_sym_str
+	     << text_str
+	     << new_sym_str;
 
 	run_command(L"python", args, false);
 }

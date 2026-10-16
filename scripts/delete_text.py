@@ -26,6 +26,11 @@ def is_deletable_annot(annot):
         return True
     return False
 
+def rect_distance_to_point(rect, pt):
+    dx = max(rect.x0 - pt.x, 0.0, pt.x - rect.x1)
+    dy = max(rect.y0 - pt.y, 0.0, pt.y - rect.y1)
+    return (dx * dx + dy * dy) ** 0.5
+
 def main():
     if len(sys.argv) < 6:
         return
@@ -89,41 +94,48 @@ def main():
             selected_rect[3] += page.rect.y0
 
         search_rect = fitz.Rect(selected_rect)
-
-        # If rect is tiny (click), expand slightly to make clicking easy
-        if search_rect.width < 10 and search_rect.height < 10:
-            search_rect.x0 -= 15
-            search_rect.y0 -= 15
-            search_rect.x1 += 15
-            search_rect.y1 += 15
+        is_click = (search_rect.width < 10 and search_rect.height < 10)
 
         deleted_count = 0
         deleted_contents = []
+        deletable_annots = [a for a in list(page.annots()) if is_deletable_annot(a)]
 
-        for annot in list(page.annots()):
-            if is_deletable_annot(annot):
-                if annot.rect.intersects(search_rect):
-                    content = annot.info.get('content', '')
-                    deleted_contents.append(content)
-                    page.delete_annot(annot)
-                    deleted_count += 1
-
-        # Fallback: if clicking didn't directly intersect, find closest annotation within 30 points
-        if deleted_count == 0 and search_rect.width <= 40 and search_rect.height <= 40:
+        if is_click:
             click_point = fitz.Point((search_rect.x0 + search_rect.x1) / 2, (search_rect.y0 + search_rect.y1) / 2)
             best_annot = None
             best_dist = 30.0
-            for annot in list(page.annots()):
-                if is_deletable_annot(annot):
-                    dist = annot.rect.distance_to_point(click_point)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_annot = annot
+            for annot in deletable_annots:
+                dist = rect_distance_to_point(annot.rect, click_point)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_annot = annot
             if best_annot:
                 content = best_annot.info.get('content', '')
                 deleted_contents.append(content)
                 page.delete_annot(best_annot)
                 deleted_count += 1
+        else:
+            # Check for exact rect match first (e.g., when deleting a specific item from gm list)
+            exact_annot = None
+            for annot in deletable_annots:
+                if (abs(annot.rect.x0 - search_rect.x0) < 2.0 and
+                    abs(annot.rect.y0 - search_rect.y0) < 2.0 and
+                    abs(annot.rect.x1 - search_rect.x1) < 2.0 and
+                    abs(annot.rect.y1 - search_rect.y1) < 2.0):
+                    exact_annot = annot
+                    break
+            if exact_annot is not None:
+                content = exact_annot.info.get('content', '')
+                deleted_contents.append(content)
+                page.delete_annot(exact_annot)
+                deleted_count += 1
+            else:
+                for annot in deletable_annots:
+                    if annot.rect.intersects(search_rect):
+                        content = annot.info.get('content', '')
+                        deleted_contents.append(content)
+                        page.delete_annot(annot)
+                        deleted_count += 1
 
         if deleted_count > 0:
             doc.saveIncr()
