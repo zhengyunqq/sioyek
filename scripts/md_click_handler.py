@@ -89,36 +89,78 @@ def main():
     click_y = mouse_y + page.rect.y0
     click_pt = fitz.Point(click_x, click_y)
 
-    # Search for Markdown annotations under or near click position
+    # Search for Markdown or FreeText/Text annotations under or near click position
     candidates = []
     all_annots = list(page.annots())
     for annot in all_annots:
-        if annot.type[1] == 'Stamp':
+        atype = annot.type[1]
+        is_md = False
+        if atype == 'Stamp':
             subj = annot.info.get('subject', '')
             if subj in ('sioyek_markdown', 'sioyek_markdown_pill', 'sioyek_markdown_card'):
-                if annot.rect.contains(click_pt):
-                    # Direct hit: prioritize smaller bounding boxes if overlapping
-                    area = annot.rect.width * annot.rect.height
-                    score = 100000.0 - (area * 0.001)
+                is_md = True
+        elif atype in ('FreeText', 'Text'):
+            is_md = True
+        if is_md:
+            if annot.rect.contains(click_pt):
+                area = annot.rect.width * annot.rect.height
+                score = 100000.0 - (area * 0.001)
+                candidates.append((score, annot))
+            else:
+                dist = rect_distance_to_point(annot.rect, click_pt)
+                if dist <= 35.0:
+                    score = 1000.0 - dist
                     candidates.append((score, annot))
-                else:
-                    dist = rect_distance_to_point(annot.rect, click_pt)
-                    # Forgiving hit tolerance: within 35pt of the badge
-                    if dist <= 35.0:
-                        score = 1000.0 - dist
-                        candidates.append((score, annot))
 
     if not candidates:
-        # Not clicking on a Markdown note -> Quietly exit
+        # Not clicking on a note -> Quietly exit
         doc.close()
         sys.exit(0)
 
-    # Sort best matching Markdown annotation
+    # Sort best matching annotation
     candidates.sort(key=lambda x: x[0], reverse=True)
     target_annot = candidates[0][1]
     md_text = target_annot.info.get('content', '')
     subj = target_annot.info.get('subject', '')
     existing_mode = 'pill' if subj == 'sioyek_markdown_pill' else 'card'
+
+    def safe_notify(msg=None):
+        try:
+            sioyek.reload()
+        except Exception:
+            pass
+        try:
+            if msg:
+                sioyek.set_status_string(msg)
+        except Exception:
+            pass
+
+    def update_annot_snapshot():
+        try:
+            try:
+                from .preserve_pdf_annotations import sync_snapshot
+            except ImportError:
+                from preserve_pdf_annotations import sync_snapshot
+            sync_snapshot(FILE_PATH, allow_empty=True)
+        except Exception:
+            pass
+
+    def do_promote_to_tex(text_to_promote):
+        annot_rect = list(target_annot.rect)
+        try:
+            try:
+                from .add_study_note import promote_annotation_to_study_note
+            except ImportError:
+                from add_study_note import promote_annotation_to_study_note
+            tex_msg = promote_annotation_to_study_note(FILE_PATH, page_num, annot_rect, text_to_promote)
+            page.delete_annot(target_annot)
+            doc.saveIncr()
+            doc.close()
+            update_annot_snapshot()
+            safe_notify(f"已转为 TeX 批注：{tex_msg}")
+        except Exception as ex:
+            doc.close()
+            safe_notify(f"转为 TeX 批注失败：{ex}")
 
     # Launch large popup Markdown Reader Dialog
     app = QApplication.instance()
@@ -134,6 +176,11 @@ def main():
 
     if reader_action == "close":
         doc.close()
+        app.quit()
+        sys.exit(0)
+
+    if reader_action == "to_tex":
+        do_promote_to_tex(md_text)
         app.quit()
         sys.exit(0)
 
@@ -155,19 +202,13 @@ def main():
         editor.close()
         editor.deleteLater()
 
-        def safe_notify(msg=None):
-            try:
-                sioyek.reload()
-            except Exception:
-                pass
-            try:
-                if msg:
-                    sioyek.set_status_string(msg)
-            except Exception:
-                pass
-
         if editor_action == "cancel":
             doc.close()
+            app.quit()
+            sys.exit(0)
+
+        if editor_action == "to_tex":
+            do_promote_to_tex((editor_text or md_text).strip())
             app.quit()
             sys.exit(0)
 
@@ -175,6 +216,7 @@ def main():
             page.delete_annot(target_annot)
             doc.saveIncr()
             doc.close()
+            update_annot_snapshot()
             safe_notify("Deleted Markdown note")
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"Success: deleted note on page {page_num}\n")
@@ -187,6 +229,7 @@ def main():
                 page.delete_annot(target_annot)
                 doc.saveIncr()
                 doc.close()
+                update_annot_snapshot()
                 safe_notify("Deleted Markdown note")
                 app.quit()
                 sys.exit(0)
@@ -214,6 +257,7 @@ def main():
             new_annot.update()
             doc.saveIncr()
             doc.close()
+            update_annot_snapshot()
 
             msg = f"Updated Markdown {new_mode}"
             safe_notify(msg)

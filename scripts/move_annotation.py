@@ -67,15 +67,20 @@ def main():
     # Search for the target annotation on this page
     candidates = []
     for annot in page.annots():
-        if annot.type[1] == 'Stamp':
+        atype = annot.type[1]
+        is_movable = False
+        if atype == 'Stamp':
             subj = annot.info.get('subject', '')
             if subj in ('sioyek_markdown_pill', 'sioyek_markdown_card', 'sioyek_markdown'):
-                # Check top-left delta or distance to point
-                tl_dist = ((annot.rect.x0 - orig_x0) ** 2 + (annot.rect.y0 - orig_y0) ** 2) ** 0.5
-                pt_dist = rect_distance_to_point(annot.rect, orig_pt)
-                score = min(tl_dist, pt_dist)
-                if annot.rect.contains(orig_pt) or score <= 40.0:
-                    candidates.append((score, annot))
+                is_movable = True
+        elif atype in ('FreeText', 'Text'):
+            is_movable = True
+        if is_movable:
+            tl_dist = ((annot.rect.x0 - orig_x0) ** 2 + (annot.rect.y0 - orig_y0) ** 2) ** 0.5
+            pt_dist = rect_distance_to_point(annot.rect, orig_pt)
+            score = min(tl_dist, pt_dist)
+            if annot.rect.contains(orig_pt) or score <= 40.0:
+                candidates.append((score, annot))
 
     if not candidates:
         doc.close()
@@ -89,10 +94,34 @@ def main():
     h = target_annot.rect.height
     new_rect = fitz.Rect(new_x0, new_y0, new_x0 + w, new_y0 + h)
 
-    target_annot.set_rect(new_rect)
-    target_annot.update()
+    if target_annot.type[1] == 'FreeText':
+        try:
+            from .preserve_pdf_annotations import extract_freetext_style
+            ft_style = extract_freetext_style(doc, target_annot, dict(target_annot.colors or {}))
+            target_annot.set_rect(new_rect)
+            target_annot.update(
+                fontsize=ft_style.get("fontsize", 11.0),
+                text_color=tuple(ft_style["text_color"]) if ft_style.get("text_color") else (0.85, 0.1, 0.1),
+                fill_color=tuple(ft_style["fill_color"]) if ft_style.get("fill_color") else None,
+                border_color=tuple(ft_style["border_color"]) if ft_style.get("border_color") else None,
+            )
+        except Exception:
+            target_annot.set_rect(new_rect)
+            target_annot.update()
+    else:
+        target_annot.set_rect(new_rect)
+        target_annot.update()
     doc.saveIncr()
     doc.close()
+
+    try:
+        try:
+            from .preserve_pdf_annotations import sync_snapshot
+        except ImportError:
+            from preserve_pdf_annotations import sync_snapshot
+        sync_snapshot(FILE_PATH, allow_empty=True)
+    except Exception:
+        pass
 
     sioyek = Sioyek(SIOYEK_PATH, LOCAL_DATABASE_PATH, SHARED_DATABASE_PATH)
     try:

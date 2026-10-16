@@ -17,34 +17,38 @@ This fork extends Sioyek with deep **LaTeX / SyncTeX integration**, **cross-reco
 
 ### 1. Automatic Annotation Preservation Across LaTeX Recompilations (`preserve_pdf_annotations.py`)
 When recompiling a `.tex` document (via `tectonic`, `latexmk`, `xelatex`, etc.), the freshly generated `.pdf` normally loses all PDF-embedded annotations and shifts text coordinates. Sioyek now handles this automatically on `Document::open` and `Document::reload`:
-* **Snapshot Storage**: Automatically maintains a snapshot of all PDF annotations in `<pdf_dir>/.sioyek_bak/<pdf_stem>.pdf_annots.json`.
+* **Snapshot Storage & Zero-Overhead Fast Open**: Automatically maintains a snapshot of all PDF annotations in `<pdf_dir>/.sioyek_bak/<pdf_stem>.pdf_annots.json` with `(pdf_mtime_ns, pdf_mtime_sec, pdf_size)` caching. Opening an unchanged large PDF verifies metadata in C++ in `< 0.1ms` and skips spawning Python entirely.
 * **Multi-Software Annotation Support**: Preserves Sioyek annotations (`add_markdown` cards/pills, `add_text` FreeText) as well as annotations created in external PDF viewers (**macOS Preview / PDFKit**, **Adobe Acrobat**, **PDF Expert**, **Skim**), including:
   * Text markups: `Highlight`, `Underline`, `StrikeOut`, `Squiggly` (with word-level `Quad` re-anchoring across horizontal shifts and line re-wraps)
   * Notes & text boxes: `FreeText` (preserving `/DA` font size, text color, and background fill color) and `Text` sticky notes (preserving icon types)
   * Drawings & shapes: `Ink`, `Square`, `Circle`, `Line`, `PolyLine`, `Polygon`, `Caret`, and third-party `Stamp` graphics (preserving border widths, dash patterns, interior fill colors, and arrow `line_ends`)
-* **SyncTeX Smart Tracking + Coordinate Fallback**: Each annotation records a SyncTeX anchor (`tex_file`, `line`, `line_text`, `ref_page`, `ref_y`, `delta_y`). If `.tex` edits shift a paragraph vertically or push it onto another page, restored annotations automatically follow the paragraph's new `(page, y)` (keeping `x` unchanged). When SyncTeX is unavailable, original `(page, rect)` coordinates are used as fallback.
+* **SyncTeX Smart Tracking + Collision Avoidance + Status Bar Feedback**:
+  * Each annotation records a SyncTeX anchor (`tex_file`, `line`, `line_text`, `ref_page`, `ref_y`, `delta_y`). If `.tex` edits shift a paragraph vertically or push it onto another page, restored annotations automatically follow the paragraph's new `(page, y)` (keeping `x` unchanged).
+  * **Margin Collision Avoidance**: When multiple originally non-overlapping margin annotations (`Stamp`, `FreeText`, `Text`) land on overlapping vertical regions after SyncTeX relocation, lower annotations automatically shift downward (`+6pt` gap) to prevent overlap.
+  * **Status Bar Feedback**: Upon recompilation and restoration, Sioyek displays a concise summary in the bottom status bar (e.g., `已恢复 17 条批注（其中 3 条随段落跨页迁移）`).
 * **Sioyek Database Highlight Re-Alignment**: Sioyek SQLite highlights (`h`) verify their underlying text on reload and automatically re-align `selection_begin` / `selection_end` across `orig_page ± 2` if LaTeX recompilation shifted the text.
 
-### 2. LaTeX Source Study Notes (`as` / `us`) & Source Highlights (`h` / `dh` / `uh`)
+### 2. LaTeX Source Study Notes (`as` / `us`) & One-Click PDF-to-TeX Promotion (`T`)
 * **Study Notes (`_add_study_note`, key `as` / undo `us`)**: Select a region or text in a SyncTeX-enabled PDF to insert or edit `\studynote{...}` directly in the corresponding `.tex` source file (automatically injecting the preamble macro with automatic line-breaking support for long words, underscores `\_`, and slashes `\slash`).
+* **One-Click Promotion from Temporary PDF Notes (`am` / `at`) to LaTeX `\studynote{...}`**: Option-click (`⌥ + Left Click`) any Markdown card/pill (`am`) or `FreeText`/`Text` (`at`) annotation and press `T` (or click `📤 转为 TeX 批注 (T)`) to convert and write the note directly into the corresponding `.tex` line as `\studynote{...}` via SyncTeX and remove the temporary PDF annotation in one step.
 * **Source Highlight Embedding (`embed_tex_annotation.py`)**: Adding a highlight (`h` + `[a-z]`) in a SyncTeX-enabled PDF automatically wraps the corresponding `.tex` source span with `\sioyekhlbegin[type]...\sioyekhlend[type] \sioyekhlmark[type]{...}`. Deleting the highlight (`dh`) or pressing `uh` removes/undoes the `.tex` markup cleanly (backups stored in `.sioyek_bak/`).
 
-### 3. Markdown + LaTeX Cards & Collapsible Pills (`am` / `gm` / `⌥ + Click`)
+### 3. Full-Document PDF Annotation Overview (`gm`) & Markdown Cards/Pills (`am` / `⌥ + Click`)
 * **Create / Edit (`am`)**: Select a region and press `am` to write notes with full Markdown formatting, code blocks, and rendered LaTeX math (`$...$`, `$$...$$`). Can be displayed as a full card or collapsed into a compact pill badge.
-* **Quick View (`⌥ + Left Click`)**: Option-click any Markdown card or pill to open the interactive reader/editor popup.
-* **Search & Jump (`gm`)**: Press `gm` (`goto_markdown`) to fuzzy-search across all Markdown annotations in the current PDF and jump directly to them.
+* **Quick View, Edit & Promote (`⌥ + Left Click`)**: Option-click any Markdown card, pill, or `FreeText`/`Text` note to open the interactive reader/editor popup (`E` to edit, `T` to promote to `.tex` `\studynote{...}`).
+* **Full-Document PDF Annotation Overview (`gm`)**: Press `gm` (`goto_markdown`) to fuzzy-search, jump to, or delete (`d` / `Delete`) across **all** PDF annotations in the document: `📌 [胶囊]`, `📋 [卡片]`, `📝 [文本]` (`FreeText` & Sticky Note), `🖍️ [高亮笔记]`, `🖍️ [外部高亮]`, and `🏷️ [印章]`.
 
 ### 4. FreeText PDF Annotations (`at` / `dt` / `ut`) & Apple Vision OCR (`:ocr`)
-* **FreeText (`at` / `dt` / `ut`)**: Press `at` to embed a FreeText box directly into the PDF (with automatic CJK font support), `dt` to delete a selected text annotation, or `ut` to undo the last added text annotation on the current page.
+* **FreeText (`at` / `dt` / `ut`)**: Press `at` to embed a FreeText box directly into the PDF (with automatic CJK font support and mouse drag-to-move), `dt` to delete a selected annotation, or `ut` to undo the last added annotation on the current page.
 * **Apple Vision OCR (`_ocr`)**: Run `:_ocr` on scanned PDFs to inject an invisible, accurately aligned text layer via macOS native Vision framework (automatically skipping pages that already have text).
 
 ### Summary of Custom Keybindings (`keys_user.config`)
 | Key / Action | Command | Description |
 | :--- | :--- | :--- |
 | `am` | `_add_markdown` | Create or edit a Markdown + LaTeX card / pill |
-| `gm` | `goto_markdown` | Fuzzy-search and jump to Markdown annotations |
-| `⌥ + Left Click` | `_md_click_handler` | Open/edit Markdown card or pill under cursor |
-| `at` / `dt` / `ut` | `_add_text` / `_delete_text` / `_delete_last_text` | Add, delete, or undo PDF FreeText annotation |
+| `gm` | `goto_markdown` | Full-document PDF annotation overview (search, jump, `d` to delete) |
+| `⌥ + Left Click` | `_md_click_handler` | Inspect/edit (`E`) or promote (`T`) Markdown / FreeText note to `.tex` |
+| `at` / `dt` / `ut` | `_add_text` / `_delete_text` / `_delete_last_text` | Add, delete, or undo PDF annotation |
 | `as` / `us` | `_add_study_note` / `_undo_study_note` | Insert/edit or undo `\studynote{}` in `.tex` source |
 | `h` / `dh` / `uh` | `add_highlight` / `delete_highlight` / `_undo_highlight` | Add, delete, or undo highlight (syncs with `.tex` via SyncTeX) |
 | `⌘ + Left Click` | `smart_jump_under_cursor` | Smart jump to figure / equation / reference |

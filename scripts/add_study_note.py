@@ -164,6 +164,19 @@ def synctex_query(synctex_bin, pdf_path, page_1based, x, y):
     return results
 
 
+def _is_shipout_line(tex_path, line_1based):
+    try:
+        with open(tex_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        if 1 <= line_1based <= len(lines):
+            s = lines[line_1based - 1].strip()
+            if s.startswith(r"\end{document}") or s.startswith(r"\begin{document}") or s.startswith(r"\documentclass"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def resolve_source(pdf_path, page0, rect):
     """Maps the selection rect to the best (tex_path, line_1based)."""
     if not has_synctex_data(pdf_path):
@@ -171,14 +184,20 @@ def resolve_source(pdf_path, page0, rect):
     synctex_bin = find_synctex_binary()
     x0, y0, x1, y1 = rect
     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    points = [(cx, cy)]
-    if x1 - x0 > 2 or y1 - y0 > 2:
-        points += [(x0 + 1, y0 + 1), (x1 - 1, y1 - 1), (x0 + 1, cy), (x1 - 1, cy)]
-    hits = []  # (path, line, is_center)
+    if cx < 135.0 or cx > 440.0:
+        # Margin annotation (left or right margin): probe main text column at the same vertical level first
+        points = [(250.0, y0 + 6.0), (250.0, cy), (300.0, y0 + 6.0), (200.0, cy), (cx, cy)]
+    else:
+        points = [(cx, cy)]
+        if x1 - x0 > 2 or y1 - y0 > 2:
+            points += [(x0 + 1, y0 + 1), (x1 - 1, y1 - 1), (x0 + 1, cy), (x1 - 1, cy)]
+        points += [(250.0, y0 + 6.0), (250.0, cy)]
+    hits = []  # (path, line, is_primary)
     for idx, (px, py) in enumerate(points):
         for path, line in synctex_query(synctex_bin, pdf_path, page0 + 1, px, py):
             if path.lower().endswith((".tex", ".ltx")) and os.path.exists(path):
-                hits.append((path, line, idx == 0))
+                if not _is_shipout_line(path, line):
+                    hits.append((path, line, idx == 0))
     if not hits:
         raise StudyNoteError("SyncTeX 未能定位到 .tex 源文件")
     counts = {}
@@ -1000,6 +1019,51 @@ def run_dialog(target):
     dlg = Dialog()
     dlg.exec_()
     return dlg.result_msg
+
+
+def markdown_to_latex_note(raw_text):
+    """Converts lightweight Markdown formatting from am/at annotations into LaTeX suitable for \\studynote{...}."""
+    lines = []
+    for raw_line in (raw_text or "").splitlines():
+        s = raw_line.strip()
+        if not s:
+            continue
+        # Convert Markdown headings: ### Heading -> \textbf{Heading}
+        m_head = re.match(r"^#{1,6}\s+(.*)$", s)
+        if m_head:
+            s = r"\textbf{" + m_head.group(1).strip() + "}"
+        else:
+            # Convert bullet prefix: - item / * item -> \textbullet\ item
+            s = re.sub(r"^[-*]\s+", r"\\textbullet\\ ", s)
+        # Convert **bold** -> \textbf{bold}
+        s = re.sub(r"\*\*([^*]+)\*\*", r"\\textbf{\1}", s)
+        # Convert `code` -> \texttt{code}
+        s = re.sub(r"`([^`]+)`", r"\\texttt{\1}", s)
+        lines.append(s)
+    return "\n".join(lines)
+
+
+def promote_annotation_to_study_note(pdf_path, page0, rect, raw_text):
+    """
+    Promotes a temporary PDF annotation (Markdown card/pill or FreeText/Text) at (page0, rect)
+    into a permanent \\studynote{...} in the corresponding .tex source file via SyncTeX.
+    If that source line already has a \\studynote{...}, appends to it instead of overwriting.
+    Returns the status message from NoteTarget.apply.
+    """
+    pdf_path = os.path.abspath(clean_path(pdf_path))
+    latex_note = markdown_to_latex_note(raw_text)
+    if not latex_note.strip():
+        raise StudyNoteError("批注内容为空，无法转为 TeX 源码批注")
+    err = validate_note(latex_note)
+    if err:
+        raise StudyNoteError(err)
+    target = NoteTarget(pdf_path, int(page0), [float(x) for x in rect[:4]])
+    existing = target.existing_text().strip()
+    if existing and latex_note.strip() not in existing:
+        combined = existing + "\n" + latex_note.strip()
+    else:
+        combined = latex_note.strip()
+    return target.apply(combined)
 
 
 def notify(sioyek, msg):

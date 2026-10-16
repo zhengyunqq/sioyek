@@ -346,6 +346,26 @@ class MarkdownReaderDialog(QDialog):
 
         header.addStretch()
 
+        self.btn_to_tex = QPushButton("📤 转为 TeX 批注 (T)")
+        self.btn_to_tex.setToolTip("通过 SyncTeX 将此临时批注沉淀为 .tex 源码中的 \\studynote{...}，并移除 PDF 临时批注")
+        self.btn_to_tex.setStyleSheet("""
+            QPushButton {
+                background-color: #ffffff;
+                color: #8250df;
+                border: 1px solid #d0d7de;
+                border-radius: 6px;
+                padding: 6px 12px;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #fbefff;
+                border-color: #8250df;
+            }
+        """)
+        self.btn_to_tex.clicked.connect(self.on_to_tex)
+        header.addWidget(self.btn_to_tex)
+
         self.btn_edit = QPushButton("✏️ 编辑此笔记 (E)")
         self.btn_edit.setStyleSheet("""
             QPushButton {
@@ -421,10 +441,17 @@ class MarkdownReaderDialog(QDialog):
         if event.key() == Qt.Key_E and not (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
             self.on_edit()
             return
+        if event.key() == Qt.Key_T and not (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
+            self.on_to_tex()
+            return
         super().keyPressEvent(event)
 
     def on_edit(self):
         self.action = "edit"
+        self.accept()
+
+    def on_to_tex(self):
+        self.action = "to_tex"
         self.accept()
 
 
@@ -615,6 +642,25 @@ class MarkdownEditorDialog(QDialog):
             self.btn_delete.clicked.connect(self.on_delete)
             bottom_bar.addWidget(self.btn_delete)
 
+            self.btn_to_tex = QPushButton("📤 转为 TeX 源码批注")
+            self.btn_to_tex.setToolTip("通过 SyncTeX 将此临时批注沉淀为 .tex 源码中的 \\studynote{...}，并移除 PDF 临时批注")
+            self.btn_to_tex.setStyleSheet("""
+                QPushButton {
+                    color: #8250df;
+                    background-color: #ffffff;
+                    border: 1px solid #d0d7de;
+                    border-radius: 6px;
+                    padding: 6px 12px;
+                    font-size: 12px;
+                }
+                QPushButton:hover {
+                    background-color: #fbefff;
+                    border-color: #8250df;
+                }
+            """)
+            self.btn_to_tex.clicked.connect(self.on_to_tex)
+            bottom_bar.addWidget(self.btn_to_tex)
+
         lbl_tips = QLabel("按 <b>⌘↵</b> (Cmd+Enter) 保存 • <b>Esc</b> 取消")
         lbl_tips.setStyleSheet("color: #656d76; font-size: 12px; margin-left: 6px;")
         bottom_bar.addWidget(lbl_tips)
@@ -794,6 +840,10 @@ class MarkdownEditorDialog(QDialog):
         self.action = "delete"
         self.accept()
 
+    def on_to_tex(self):
+        self.action = "to_tex"
+        self.accept()
+
     def get_text(self):
         return self.editor.toPlainText()
 
@@ -951,6 +1001,27 @@ def main():
 
         if action == "cancel":
             doc.close()
+            app.quit()
+            sys.exit(0)
+
+        if action == "to_tex":
+            text_for_tex = (new_text or initial_text or "").strip()
+            annot_rect = list(existing_annot.rect) if existing_annot is not None else selected_rect
+            try:
+                try:
+                    from .add_study_note import promote_annotation_to_study_note
+                except ImportError:
+                    from add_study_note import promote_annotation_to_study_note
+                tex_msg = promote_annotation_to_study_note(FILE_PATH, selected_page, annot_rect, text_for_tex)
+                if existing_annot is not None:
+                    page.delete_annot(existing_annot)
+                    doc.saveIncr()
+                doc.close()
+                update_annot_snapshot()
+                safe_notify(f"已转为 TeX 批注：{tex_msg}")
+            except Exception as ex:
+                doc.close()
+                safe_notify(f"转为 TeX 批注失败：{ex}")
             app.quit()
             sys.exit(0)
 

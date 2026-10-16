@@ -20,9 +20,11 @@ def parse_rect(s):
     return page, rect
 
 def is_deletable_annot(annot):
-    if annot.type[1] in ('FreeText', 'Text'):
-        return True
-    if annot.type[1] == 'Stamp' and (annot.info.get('subject') in ('sioyek_markdown', 'sioyek_markdown_pill', 'sioyek_markdown_card') or annot.info.get('name') == 'ImageStamp'):
+    if annot.type[1] in (
+        'FreeText', 'Text', 'Stamp', 'Highlight', 'Underline',
+        'StrikeOut', 'Squiggly', 'Ink', 'Square', 'Circle',
+        'Line', 'PolyLine', 'Polygon', 'Caret',
+    ):
         return True
     return False
 
@@ -72,6 +74,13 @@ def main():
                     content = last_annot.info.get('content', '')
                     page.delete_annot(last_annot)
                     doc.saveIncr()
+                    doc.close()
+                    doc = None
+                    try:
+                        from .preserve_pdf_annotations import sync_snapshot
+                        sync_snapshot(FILE_PATH, allow_empty=True)
+                    except Exception:
+                        pass
                     safe_notify(f"Deleted note: {content[:20]}")
                     with open(log_path, "a", encoding="utf-8") as f:
                         f.write(f"Success: deleted last note '{content}' on page {pno}\n")

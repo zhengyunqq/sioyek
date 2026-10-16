@@ -193,6 +193,9 @@ def compute_synctex_anchor(pdf_path, page0, rect):
         hit = synctex_backward(synctex_bin, pdf_path, page0, px, py)
         if hit:
             rel_tex, line = hit
+            snippet = get_tex_line_snippet(pdf_path, rel_tex, line)
+            if snippet.startswith(r"\end{document}") or snippet.startswith(r"\begin{document}") or snippet.startswith(r"\documentclass"):
+                continue
             fwd = synctex_forward(synctex_bin, pdf_path, rel_tex, line)
             if fwd is not None:
                 ref_page, ref_y = fwd
@@ -201,7 +204,7 @@ def compute_synctex_anchor(pdf_path, page0, rect):
                     return {
                         "tex_file": rel_tex,
                         "line": line,
-                        "line_text": get_tex_line_snippet(pdf_path, rel_tex, line),
+                        "line_text": snippet,
                         "ref_page": ref_page,
                         "ref_y": round(ref_y, 2),
                         "delta_y": round(y0 - ref_y, 2),
@@ -409,9 +412,21 @@ def load_snapshot(pdf_path):
 def save_snapshot_data(pdf_path, entries):
     spath = get_snapshot_path(pdf_path)
     os.makedirs(os.path.dirname(spath), exist_ok=True)
+    try:
+        st = os.stat(pdf_path)
+        mtime_ns = int(st.st_mtime_ns)
+        mtime_sec = int(st.st_mtime)
+        fsize = int(st.st_size)
+    except Exception:
+        mtime_ns = 0
+        mtime_sec = 0
+        fsize = 0
     data = {
         "version": 1,
         "pdf": os.path.basename(pdf_path),
+        "pdf_mtime_ns": mtime_ns,
+        "pdf_mtime_sec": mtime_sec,
+        "pdf_size": fsize,
         "annotations": entries,
     }
     fd, tmp = tempfile.mkstemp(prefix=".sioyek_annots_", dir=os.path.dirname(spath))
@@ -493,13 +508,61 @@ def resolve_target_page_and_rect(doc, pdf_path, entry, synctex_bin):
     return target_page, fitz.Rect(target_x0, target_y0, target_x0 + w, target_y0 + h)
 
 
-def embed_entry_into_doc(doc, pdf_path, entry, synctex_bin):
+def resolve_margin_collisions(doc, saved_entries, placements):
+    """
+    Prevents movable box/margin annotations (`Stamp`, `FreeText`, `Text`) that were originally
+    non-overlapping from colliding on the same page after SyncTeX vertical/page relocation.
+    """
+    out = list(placements)
+    by_page = {}
+    for idx, (t_page, t_rect) in enumerate(out):
+        if saved_entries[idx].get("subtype") in ("Stamp", "FreeText", "Text"):
+            by_page.setdefault(t_page, []).append(idx)
+
+    for t_page, indices in by_page.items():
+        if len(indices) < 2:
+            continue
+        # Sort by target y0, then original y0
+        indices.sort(key=lambda i: (out[i][1].y0, saved_entries[i].get("rect", [0, 0, 0, 0])[1]))
+        page_rect = doc[t_page].rect
+        for pos in range(1, len(indices)):
+            j = indices[pos]
+            rj = fitz.Rect(out[j][1])
+            hj = rj.height
+            orig_pj = saved_entries[j].get("page", t_page)
+            orig_rj = fitz.Rect(saved_entries[j].get("rect", [rj.x0, rj.y0, rj.x1, rj.y1]))
+
+            for prev_pos in range(pos):
+                i = indices[prev_pos]
+                ri = out[i][1]
+                orig_pi = saved_entries[i].get("page", t_page)
+                orig_ri = fitz.Rect(saved_entries[i].get("rect", [ri.x0, ri.y0, ri.x1, ri.y1]))
+
+                # If they intentionally overlapped in the original document, do not separate them
+                if orig_pi == orig_pj and orig_ri.intersects(orig_rj):
+                    continue
+
+                # Check horizontal overlap (> 4pt) and vertical collision (within 4pt gap)
+                horiz_overlap = min(ri.x1, rj.x1) - max(ri.x0, rj.x0)
+                if horiz_overlap > 4.0 and rj.y0 < ri.y1 + 4.0 and rj.y1 > ri.y0 - 4.0:
+                    new_y0 = min(ri.y1 + 6.0, max(page_rect.y0 + 4.0, page_rect.y1 - hj - 4.0))
+                    if new_y0 > rj.y0:
+                        rj = fitz.Rect(rj.x0, new_y0, rj.x1, new_y0 + hj)
+            out[j] = (t_page, rj)
+
+    return out
+
+
+def embed_entry_into_doc(doc, pdf_path, entry, synctex_bin, placement=None):
     """Embeds a single saved annotation entry into `doc`."""
     subtype = entry.get("subtype")
     info = entry.get("info", {})
     colors = entry.get("colors", {})
     opacity = entry.get("opacity", 1.0)
-    target_page, target_rect = resolve_target_page_and_rect(doc, pdf_path, entry, synctex_bin)
+    if placement is not None:
+        target_page, target_rect = placement
+    else:
+        target_page, target_rect = resolve_target_page_and_rect(doc, pdf_path, entry, synctex_bin)
     page = doc[target_page]
 
     orig_rect = entry.get("rect", [target_rect.x0, target_rect.y0, target_rect.x1, target_rect.y1])
@@ -703,13 +766,37 @@ def _saved_signature_list(saved_entries):
     return sigs
 
 
+def format_restore_status_message(restored, cross_page_count, vert_shift_count):
+    if restored <= 0:
+        return ""
+    if cross_page_count > 0 and vert_shift_count > 0:
+        return f"已恢复 {restored} 条批注（其中 {cross_page_count} 条跨页迁移，{vert_shift_count} 条随段落位移）"
+    if cross_page_count > 0:
+        return f"已恢复 {restored} 条批注（其中 {cross_page_count} 条随段落跨页迁移）"
+    if vert_shift_count > 0:
+        return f"已恢复 {restored} 条批注（其中 {vert_shift_count} 条随段落位移）"
+    return f"已恢复 {restored} 条批注"
+
+
+def write_status_file(pdf_path, msg):
+    spath = get_snapshot_path(pdf_path) + ".status"
+    try:
+        os.makedirs(os.path.dirname(spath), exist_ok=True)
+        with open(spath, "w", encoding="utf-8") as f:
+            f.write(msg)
+    except Exception:
+        pass
+
+
 def restore_or_sync_pdf_annotations(pdf_path):
     """
     Main entry point called when Sioyek opens or reloads `pdf_path`:
+    0. Fast-path mtime + size check: if `pdf_path` has the exact same `(mtime_ns, size)`
+       as recorded in `.sioyek_bak/<stem>.pdf_annots.json`, exits in 0.1ms without opening `fitz`.
     1. If `pdf_path` has 0 user annotations (e.g. freshly compiled by LaTeX) and
        `.sioyek_bak/<stem>.pdf_annots.json` has saved annotations, restores all saved
-       annotations into `pdf_path` (adjusting positions via SyncTeX if text shifted)
-       and updates the snapshot's SyncTeX anchors.
+       annotations into `pdf_path` (adjusting positions via SyncTeX if text shifted and
+       avoiding margin collisions) and updates the snapshot's SyncTeX anchors.
     2. Otherwise, if `pdf_path` has user annotations on disk (e.g. added or edited in
        an external PDF viewer such as macOS Preview or Adobe Acrobat), snapshots them to
        `.sioyek_bak/<stem>.pdf_annots.json`.
@@ -717,6 +804,21 @@ def restore_or_sync_pdf_annotations(pdf_path):
     """
     if not os.path.exists(pdf_path):
         return 0
+
+    snap = load_snapshot(pdf_path)
+    saved_entries = snap.get("annotations", []) if snap else []
+
+    # Fast-path: if PDF mtime_ns and file size match the snapshot, zero-overhead exit
+    try:
+        st = os.stat(pdf_path)
+        if (
+            snap is not None
+            and snap.get("pdf_mtime_ns") == int(st.st_mtime_ns)
+            and snap.get("pdf_size") == int(st.st_size)
+        ):
+            return 0
+    except Exception:
+        pass
 
     try:
         doc = fitz.open(pdf_path)
@@ -726,35 +828,60 @@ def restore_or_sync_pdf_annotations(pdf_path):
 
     try:
         current_sigs = _collect_current_annot_signatures(doc)
-        snap = load_snapshot(pdf_path)
-        saved_entries = snap.get("annotations", []) if snap else []
 
         # Case 1: Freshly recompiled PDF (0 annotations on disk, saved annotations in snapshot)
         if len(current_sigs) == 0 and len(saved_entries) > 0:
             synctex_bin = find_synctex_binary() if has_synctex_data(pdf_path) else None
+            raw_placements = [resolve_target_page_and_rect(doc, pdf_path, entry, synctex_bin) for entry in saved_entries]
+            placements = resolve_margin_collisions(doc, saved_entries, raw_placements)
+
             restored = 0
-            for entry in saved_entries:
+            cross_page_count = 0
+            vert_shift_count = 0
+            for entry, (t_page, t_rect) in zip(saved_entries, placements):
                 try:
-                    if embed_entry_into_doc(doc, pdf_path, entry, synctex_bin):
+                    if embed_entry_into_doc(doc, pdf_path, entry, synctex_bin, placement=(t_page, t_rect)):
                         restored += 1
+                        orig_page = entry.get("page", t_page)
+                        orig_y0 = entry.get("rect", [0, t_rect.y0, 0, 0])[1]
+                        if t_page != orig_page:
+                            cross_page_count += 1
+                        elif abs(t_rect.y0 - orig_y0) > 4.0:
+                            vert_shift_count += 1
                 except Exception as e:
                     log(f"Failed to restore annotation {entry.get('subtype')}: {e}")
             if restored > 0:
                 doc.saveIncr()
-                # Refresh anchors after restoration
                 updated_entries = extract_annotations_from_doc(doc, pdf_path, existing_entries=saved_entries)
+                doc.close()
+                doc = None
                 save_snapshot_data(pdf_path, updated_entries)
-                log(f"Restored {restored}/{len(saved_entries)} annotation(s) into recompiled {os.path.basename(pdf_path)}")
+                status_msg = format_restore_status_message(restored, cross_page_count, vert_shift_count)
+                write_status_file(pdf_path, status_msg)
+                log(f"Restored {restored}/{len(saved_entries)} annotation(s) into recompiled {os.path.basename(pdf_path)}: {status_msg}")
             return restored
 
         # Case 2: PDF on disk has annotations (e.g. external PDF annotations added/edited/removed)
-        if len(current_sigs) > 0 and current_sigs != _saved_signature_list(saved_entries):
-            entries = extract_annotations_from_doc(doc, pdf_path, existing_entries=saved_entries)
-            save_snapshot_data(pdf_path, entries)
-            log(f"Synced {len(entries)} annotation(s) from {os.path.basename(pdf_path)} into snapshot")
+        if len(current_sigs) > 0:
+            if current_sigs != _saved_signature_list(saved_entries):
+                entries = extract_annotations_from_doc(doc, pdf_path, existing_entries=saved_entries)
+                doc.close()
+                doc = None
+                save_snapshot_data(pdf_path, entries)
+                log(f"Synced {len(entries)} annotation(s) from {os.path.basename(pdf_path)} into snapshot")
+            else:
+                # Annotations unchanged, just refresh mtime/size cache in snapshot
+                doc.close()
+                doc = None
+                save_snapshot_data(pdf_path, saved_entries)
+        elif snap is not None:
+            doc.close()
+            doc = None
+            save_snapshot_data(pdf_path, [])
         return 0
     finally:
-        doc.close()
+        if doc is not None:
+            doc.close()
 
 
 if __name__ == "__main__":
@@ -766,4 +893,5 @@ if __name__ == "__main__":
         sync_snapshot(target_pdf, allow_empty=True)
     else:
         restore_or_sync_pdf_annotations(target_pdf)
+
 

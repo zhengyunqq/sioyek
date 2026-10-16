@@ -520,6 +520,10 @@ MainWidget::MainWidget(fz_context* mupdf_context,
                     doc->reload();
                     pdf_renderer->clear_cache();
                     invalidate_render();
+                    if (!doc->last_restore_status.empty()) {
+                        set_status_message(doc->last_restore_status);
+                        doc->last_restore_status.clear();
+                    }
                 }
             }
         }
@@ -3292,6 +3296,10 @@ void MainWidget::reload() {
     pdf_renderer->delete_old_pages(true, true);
     if (doc()) {
 		doc()->reload();
+		if (!doc()->last_restore_status.empty()) {
+			set_status_message(doc()->last_restore_status);
+			doc()->last_restore_status.clear();
+		}
     }
     validate_render();
 }
@@ -4587,7 +4595,7 @@ void MainWidget::handle_goto_markdown() {
 	std::vector<MarkdownAnnotation> markdown_annots = main_document_view->get_document()->get_all_markdown_annotations();
 
 	if (markdown_annots.empty()) {
-		set_status_message(L"当前文档暂无 Markdown 批注");
+		set_status_message(L"当前文档暂无 PDF 批注");
 		return;
 	}
 
@@ -4618,17 +4626,36 @@ void MainWidget::handle_goto_markdown() {
 			}
 		}
 
-		if (title.empty()) {
-			title = (annot.mode == "pill") ? L"便签" : L"卡片";
+		if (title.empty() && !annot.title.empty()) {
+			title = annot.title;
 		}
-		if (title.length() > 35) {
-			title = title.substr(0, 34) + L"…";
+		if (title.empty()) {
+			if (annot.mode == "pill") title = L"胶囊便签";
+			else if (annot.mode == "card") title = L"Markdown 卡片";
+			else if (annot.mode == "freetext" || annot.mode == "note") title = L"文本批注";
+			else if (annot.mode == "hl_note") title = L"高亮笔记";
+			else if (annot.mode == "highlight") title = L"外部高亮";
+			else title = L"印章批注";
+		}
+		if (title.length() > 38) {
+			title = title.substr(0, 37) + L"…";
 		}
 		if (clean_content.length() > 50) {
 			clean_content = clean_content.substr(0, 49) + L"…";
 		}
 
-		std::wstring prefix = (annot.mode == "pill") ? L"[便签] " : L"[卡片] ";
+		std::wstring prefix = L"📋 [卡片] ";
+		if (annot.mode == "pill") {
+			prefix = L"📌 [胶囊] ";
+		} else if (annot.mode == "freetext" || annot.mode == "note") {
+			prefix = L"📝 [文本] ";
+		} else if (annot.mode == "hl_note") {
+			prefix = L"🖍️ [高亮笔记] ";
+		} else if (annot.mode == "highlight") {
+			prefix = L"🖍️ [外部高亮] ";
+		} else if (annot.mode == "stamp") {
+			prefix = L"🏷️ [印章] ";
+		}
 		std::wstring display_name = ITEM_LIST_PREFIX + L" " + prefix + title;
 		if (!clean_content.empty()) {
 			display_name += L"  |  " + clean_content;

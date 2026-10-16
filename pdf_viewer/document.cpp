@@ -4,6 +4,8 @@
 #include <cmath>
 #include "utf8.h"
 #include <qfileinfo.h>
+#include <qfile.h>
+#include <qregularexpression.h>
 #include <qdatetime.h>
 #include <map>
 #include <regex>
@@ -693,6 +695,42 @@ static QString get_pdf_annot_snapshot_path(const std::wstring& file_name) {
 	return fi.absolutePath() + "/.sioyek_bak/" + fi.completeBaseName() + ".pdf_annots.json";
 }
 
+static bool is_pdf_snapshot_up_to_date(const QFileInfo& fi, const QString& snap_path) {
+	QFile f(snap_path);
+	if (!f.open(QIODevice::ReadOnly)) {
+		return false;
+	}
+	QByteArray head = f.read(512);
+	f.close();
+	QString s = QString::fromUtf8(head);
+	QRegularExpression re_mtime(R"("pdf_mtime_sec"\s*:\s*(\d+))");
+	QRegularExpression re_size(R"("pdf_size"\s*:\s*(\d+))");
+	auto m1 = re_mtime.match(s);
+	auto m2 = re_size.match(s);
+	if (!m1.hasMatch() || !m2.hasMatch()) {
+		return false;
+	}
+	qint64 snap_mtime = m1.captured(1).toLongLong();
+	qint64 snap_size = m2.captured(1).toLongLong();
+	return (snap_mtime > 0 && snap_mtime == fi.lastModified().toSecsSinceEpoch() && snap_size == fi.size());
+}
+
+static std::wstring consume_restore_status_file(const QString& snap_path) {
+	QString status_path = snap_path + ".status";
+	if (!QFile::exists(status_path)) {
+		return L"";
+	}
+	QFile f(status_path);
+	std::wstring res = L"";
+	if (f.open(QIODevice::ReadOnly)) {
+		QByteArray data = f.readAll();
+		f.close();
+		res = utf8_decode(data.toStdString());
+	}
+	QFile::remove(status_path);
+	return res;
+}
+
 void Document::reload(std::string password) {
 	fz_drop_document(context, doc);
 	cached_num_pages = {};
@@ -723,17 +761,6 @@ void Document::reload(std::string password) {
 
 	doc = nullptr;
 
-	QFileInfo fi(QString::fromStdWString(file_name));
-	QString snap_path = get_pdf_annot_snapshot_path(file_name);
-	QStringList args;
-	args << "-m" << "sioyek.preserve_pdf_annotations" << fi.absoluteFilePath();
-	if (QFile::exists(snap_path)) {
-		run_command(L"python", args, true);
-	}
-	else {
-		run_command(L"python", args, false);
-	}
-
 	open(invalid_flag_pointer, false, password);
 }
 
@@ -744,7 +771,13 @@ bool Document::open(bool* invalid_flag, bool force_load_dimensions, std::string 
 		QStringList args;
 		args << "-m" << "sioyek.preserve_pdf_annotations" << fi.absoluteFilePath();
 		if (QFile::exists(snap_path)) {
-			run_command(L"python", args, true);
+			if (!is_pdf_snapshot_up_to_date(fi, snap_path)) {
+				run_command(L"python", args, true);
+				std::wstring st = consume_restore_status_file(snap_path);
+				if (!st.empty()) {
+					last_restore_status = st;
+				}
+			}
 		}
 		else {
 			run_command(L"python", args, false);
@@ -2527,19 +2560,27 @@ std::vector<fz_rect> Document::get_markdown_annotations_on_page(int page_idx) {
 			pdf_page* ppage = pdf_page_from_fz_page(context, fzpage);
 			if (ppage) {
 				for (pdf_annot* annot = pdf_first_annot(context, ppage); annot; annot = pdf_next_annot(context, annot)) {
-					if (pdf_annot_type(context, annot) == PDF_ANNOT_STAMP) {
+					enum pdf_annot_type atype = pdf_annot_type(context, annot);
+					bool is_movable = false;
+					if (atype == PDF_ANNOT_STAMP) {
 						pdf_obj* subj_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "Subj");
 						if (subj_obj) {
 							const char* subj_str = pdf_to_text_string(context, subj_obj);
 							if (subj_str && strstr(subj_str, "sioyek_markdown") != nullptr) {
-								fz_rect bound = pdf_bound_annot(context, annot);
-								bound.x0 -= page_bound.x0;
-								bound.x1 -= page_bound.x0;
-								bound.y0 -= page_bound.y0;
-								bound.y1 -= page_bound.y0;
-								result.push_back(bound);
+								is_movable = true;
 							}
 						}
+					}
+					else if (atype == PDF_ANNOT_FREE_TEXT || atype == PDF_ANNOT_TEXT) {
+						is_movable = true;
+					}
+					if (is_movable) {
+						fz_rect bound = pdf_bound_annot(context, annot);
+						bound.x0 -= page_bound.x0;
+						bound.x1 -= page_bound.x0;
+						bound.y0 -= page_bound.y0;
+						bound.y1 -= page_bound.y0;
+						result.push_back(bound);
 					}
 				}
 			}
@@ -2586,8 +2627,33 @@ std::vector<MarkdownAnnotation> Document::get_all_markdown_annotations() {
 		return result;
 	}
 
+	auto extract_text_in_rect = [&](int page_idx, fz_rect r) -> std::wstring {
+		fz_stext_page* stext_page = get_stext_with_page_number(page_idx);
+		if (!stext_page) return L"";
+		std::wstring out;
+		LL_ITER(block, stext_page->first_block) {
+			if (block->type != FZ_STEXT_BLOCK_TEXT) continue;
+			LL_ITER(line, block->u.t.first_line) {
+				bool had_char = false;
+				LL_ITER(ch, line->first_char) {
+					float cx = 0.5f * (ch->quad.ul.x + ch->quad.lr.x);
+					float cy = 0.5f * (ch->quad.ul.y + ch->quad.lr.y);
+					if (cx >= r.x0 - 2.0f && cx <= r.x1 + 2.0f && cy >= r.y0 - 2.0f && cy <= r.y1 + 2.0f) {
+						out.push_back(static_cast<wchar_t>(ch->c));
+						had_char = true;
+					}
+				}
+				if (had_char && !out.empty() && out.back() != L' ') {
+					out.push_back(L' ');
+				}
+			}
+		}
+		return out;
+	};
+
 	int n_pages = num_pages();
 	for (int pno = 0; pno < n_pages; pno++) {
+		std::vector<MarkdownAnnotation> page_items;
 		fz_try(context) {
 			fz_page* fzpage = fz_load_page(context, doc, pno);
 			if (fzpage) {
@@ -2595,53 +2661,79 @@ std::vector<MarkdownAnnotation> Document::get_all_markdown_annotations() {
 				pdf_page* ppage = pdf_page_from_fz_page(context, fzpage);
 				if (ppage) {
 					for (pdf_annot* annot = pdf_first_annot(context, ppage); annot; annot = pdf_next_annot(context, annot)) {
-						if (pdf_annot_type(context, annot) == PDF_ANNOT_STAMP) {
+						enum pdf_annot_type atype = pdf_annot_type(context, annot);
+						std::string mode = "";
+						if (atype == PDF_ANNOT_STAMP) {
+							mode = "stamp";
 							pdf_obj* subj_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "Subj");
 							if (subj_obj) {
 								const char* subj_str = pdf_to_text_string(context, subj_obj);
 								if (subj_str && strstr(subj_str, "sioyek_markdown") != nullptr) {
-									fz_rect bound = pdf_bound_annot(context, annot);
-									bound.x0 -= page_bound.x0;
-									bound.x1 -= page_bound.x0;
-									bound.y0 -= page_bound.y0;
-									bound.y1 -= page_bound.y0;
-
-									std::string mode = "card";
-									if (strstr(subj_str, "pill") != nullptr) {
-										mode = "pill";
-									}
-
-									std::wstring content_w = L"";
-									pdf_obj* contents_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "Contents");
-									if (contents_obj) {
-										const char* contents_str = pdf_to_text_string(context, contents_obj);
-										if (contents_str) {
-											content_w = utf8_decode(contents_str);
-										}
-									}
-
-									std::wstring title_w = L"";
-									pdf_obj* title_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "T");
-									if (title_obj) {
-										const char* title_str = pdf_to_text_string(context, title_obj);
-										if (title_str) {
-											title_w = utf8_decode(title_str);
-										}
-									}
-
-									float abs_y = document_to_absolute_y(pno, bound.y0);
-
-									MarkdownAnnotation item;
-									item.page = pno;
-									item.rect = bound;
-									item.abs_y = abs_y;
-									item.title = title_w;
-									item.content = content_w;
-									item.mode = mode;
-									result.push_back(item);
+									mode = (strstr(subj_str, "pill") != nullptr) ? "pill" : "card";
 								}
 							}
 						}
+						else if (atype == PDF_ANNOT_FREE_TEXT) {
+							mode = "freetext";
+						}
+						else if (atype == PDF_ANNOT_TEXT) {
+							mode = "note";
+						}
+						else if (atype == PDF_ANNOT_HIGHLIGHT || atype == PDF_ANNOT_UNDERLINE ||
+						         atype == PDF_ANNOT_STRIKE_OUT || atype == PDF_ANNOT_SQUIGGLY) {
+							mode = "highlight";
+						}
+						else {
+							continue;
+						}
+
+						fz_rect bound = pdf_bound_annot(context, annot);
+						bound.x0 -= page_bound.x0;
+						bound.x1 -= page_bound.x0;
+						bound.y0 -= page_bound.y0;
+						bound.y1 -= page_bound.y0;
+
+						std::wstring content_w = L"";
+						pdf_obj* contents_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "Contents");
+						if (contents_obj) {
+							const char* contents_str = pdf_to_text_string(context, contents_obj);
+							if (contents_str) {
+								content_w = utf8_decode(contents_str);
+							}
+						}
+
+						std::wstring title_w = L"";
+						pdf_obj* title_obj = pdf_dict_gets(context, pdf_annot_obj(context, annot), "T");
+						if (title_obj) {
+							const char* title_str = pdf_to_text_string(context, title_obj);
+							if (title_str) {
+								title_w = utf8_decode(title_str);
+							}
+						}
+
+						if (mode == "highlight") {
+							std::wstring hl_text = extract_text_in_rect(pno, bound);
+							if (!content_w.empty()) {
+								mode = "hl_note";
+								if (!hl_text.empty()) {
+									content_w += L"\n" + hl_text;
+								}
+							}
+							else {
+								content_w = hl_text;
+							}
+						}
+
+						float abs_y = document_to_absolute_y(pno, bound.y0);
+
+						MarkdownAnnotation item;
+						item.page = pno;
+						item.rect = bound;
+						item.abs_y = abs_y;
+						item.title = title_w;
+						item.content = content_w;
+						item.mode = mode;
+						page_items.push_back(item);
 					}
 				}
 				fz_drop_page(context, fzpage);
@@ -2649,6 +2741,13 @@ std::vector<MarkdownAnnotation> Document::get_all_markdown_annotations() {
 		}
 		fz_catch(context) {
 		}
+		std::sort(page_items.begin(), page_items.end(), [](const MarkdownAnnotation& a, const MarkdownAnnotation& b) {
+			if (std::abs(a.rect.y0 - b.rect.y0) > 2.0f) {
+				return a.rect.y0 < b.rect.y0;
+			}
+			return a.rect.x0 < b.rect.x0;
+		});
+		result.insert(result.end(), page_items.begin(), page_items.end());
 	}
 
 	cached_all_markdown_annots = result;

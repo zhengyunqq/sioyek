@@ -31,7 +31,7 @@ struct MarkdownAnnotation {
 	float abs_y = 0.0f;
 	std::wstring title;
 	std::wstring content;
-	std::string mode; // "pill" or "card"
+	std::string mode; // "pill", "card", "freetext", "note", "hl_note", "highlight", "stamp"
 };
 
 class Document {
@@ -119,6 +119,7 @@ private:
 	void clear_toc_node(TocNode* node);
 public:
 	fz_document* doc = nullptr;
+	std::wstring last_restore_status = L"";
 
 	void add_bookmark(const std::wstring& desc, float y_offset);
 	//void add_bookmark_annotation(const BookMark& bookmark);
