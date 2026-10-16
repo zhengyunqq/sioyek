@@ -3,12 +3,56 @@
 Sioyek is a PDF viewer with a focus on textbooks and research papers.
 
 ## Contents
+* [Custom Enhancements & LaTeX Workflow](#custom-enhancements--latex-workflow)
 * [Installation](#install)
 * [Documentation](#documentation)
 * [Video Demo](#feature-video-overview)
 * [Features](#features)
 * [Build Instructions](#build-instructions)
 * [Buy Me a Coffee (or a Book!)](#donation)
+
+## Custom Enhancements & LaTeX Workflow
+
+This fork extends Sioyek with deep **LaTeX / SyncTeX integration**, **cross-recompilation PDF annotation preservation**, **Markdown + LaTeX study cards**, and **macOS native Apple Vision OCR**:
+
+### 1. Automatic Annotation Preservation Across LaTeX Recompilations (`preserve_pdf_annotations.py`)
+When recompiling a `.tex` document (via `tectonic`, `latexmk`, `xelatex`, etc.), the freshly generated `.pdf` normally loses all PDF-embedded annotations and shifts text coordinates. Sioyek now handles this automatically on `Document::open` and `Document::reload`:
+* **Snapshot Storage**: Automatically maintains a snapshot of all PDF annotations in `<pdf_dir>/.sioyek_bak/<pdf_stem>.pdf_annots.json`.
+* **Multi-Software Annotation Support**: Preserves Sioyek annotations (`add_markdown` cards/pills, `add_text` FreeText) as well as annotations created in external PDF viewers (**macOS Preview / PDFKit**, **Adobe Acrobat**, **PDF Expert**, **Skim**), including:
+  * Text markups: `Highlight`, `Underline`, `StrikeOut`, `Squiggly` (with word-level `Quad` re-anchoring across horizontal shifts and line re-wraps)
+  * Notes & text boxes: `FreeText` (preserving `/DA` font size, text color, and background fill color) and `Text` sticky notes (preserving icon types)
+  * Drawings & shapes: `Ink`, `Square`, `Circle`, `Line`, `PolyLine`, `Polygon`, `Caret`, and third-party `Stamp` graphics (preserving border widths, dash patterns, interior fill colors, and arrow `line_ends`)
+* **SyncTeX Smart Tracking + Coordinate Fallback**: Each annotation records a SyncTeX anchor (`tex_file`, `line`, `line_text`, `ref_page`, `ref_y`, `delta_y`). If `.tex` edits shift a paragraph vertically or push it onto another page, restored annotations automatically follow the paragraph's new `(page, y)` (keeping `x` unchanged). When SyncTeX is unavailable, original `(page, rect)` coordinates are used as fallback.
+* **Sioyek Database Highlight Re-Alignment**: Sioyek SQLite highlights (`h`) verify their underlying text on reload and automatically re-align `selection_begin` / `selection_end` across `orig_page ± 2` if LaTeX recompilation shifted the text.
+
+### 2. LaTeX Source Study Notes (`as` / `us`) & Source Highlights (`h` / `dh` / `uh`)
+* **Study Notes (`_add_study_note`, key `as` / undo `us`)**: Select a region or text in a SyncTeX-enabled PDF to insert or edit `\studynote{...}` directly in the corresponding `.tex` source file (automatically injecting the preamble macro with automatic line-breaking support for long words, underscores `\_`, and slashes `\slash`).
+* **Source Highlight Embedding (`embed_tex_annotation.py`)**: Adding a highlight (`h` + `[a-z]`) in a SyncTeX-enabled PDF automatically wraps the corresponding `.tex` source span with `\sioyekhlbegin[type]...\sioyekhlend[type] \sioyekhlmark[type]{...}`. Deleting the highlight (`dh`) or pressing `uh` removes/undoes the `.tex` markup cleanly (backups stored in `.sioyek_bak/`).
+
+### 3. Markdown + LaTeX Cards & Collapsible Pills (`am` / `gm` / `⌥ + Click`)
+* **Create / Edit (`am`)**: Select a region and press `am` to write notes with full Markdown formatting, code blocks, and rendered LaTeX math (`$...$`, `$$...$$`). Can be displayed as a full card or collapsed into a compact pill badge.
+* **Quick View (`⌥ + Left Click`)**: Option-click any Markdown card or pill to open the interactive reader/editor popup.
+* **Search & Jump (`gm`)**: Press `gm` (`goto_markdown`) to fuzzy-search across all Markdown annotations in the current PDF and jump directly to them.
+
+### 4. FreeText PDF Annotations (`at` / `dt` / `ut`) & Apple Vision OCR (`:ocr`)
+* **FreeText (`at` / `dt` / `ut`)**: Press `at` to embed a FreeText box directly into the PDF (with automatic CJK font support), `dt` to delete a selected text annotation, or `ut` to undo the last added text annotation on the current page.
+* **Apple Vision OCR (`_ocr`)**: Run `:_ocr` on scanned PDFs to inject an invisible, accurately aligned text layer via macOS native Vision framework (automatically skipping pages that already have text).
+
+### Summary of Custom Keybindings (`keys_user.config`)
+| Key / Action | Command | Description |
+| :--- | :--- | :--- |
+| `am` | `_add_markdown` | Create or edit a Markdown + LaTeX card / pill |
+| `gm` | `goto_markdown` | Fuzzy-search and jump to Markdown annotations |
+| `⌥ + Left Click` | `_md_click_handler` | Open/edit Markdown card or pill under cursor |
+| `at` / `dt` / `ut` | `_add_text` / `_delete_text` / `_delete_last_text` | Add, delete, or undo PDF FreeText annotation |
+| `as` / `us` | `_add_study_note` / `_undo_study_note` | Insert/edit or undo `\studynote{}` in `.tex` source |
+| `h` / `dh` / `uh` | `add_highlight` / `delete_highlight` / `_undo_highlight` | Add, delete, or undo highlight (syncs with `.tex` via SyncTeX) |
+| `⌘ + Left Click` | `smart_jump_under_cursor` | Smart jump to figure / equation / reference |
+| `⌘ + ⇧ + Left Click` | `synctex_under_cursor` | Inverse search jump to `.tex` line in VS Code |
+| `⇧ + Left Click` | `overview_under_cursor` | Open floating overview preview window |
+| `T` / `gt` | `_translate` / `_translate_google` | Look up selection in Eudic (`T`) or Google Translate (`gt`) |
+| `D` | `_dual_panelify` | Toggle side-by-side dual-panel reading mode |
+| `dap` | `delete_all_portals` | Clear all portals in the current document |
 
 ## Install
 ### Official packages
@@ -33,7 +77,7 @@ Debian | [sioyek](https://packages.debian.org/sioyek) | [@viccie30](https://gith
 NixOS | [sioyek](https://search.nixos.org/packages?channel=unstable&show=sioyek&from=0&size=50&sort=relevance&type=packages&query=sioyek) | [@podocarp](https://github.com/podocarp)
 openSUSE | [Publishing](https://build.opensuse.org/package/show/Publishing/sioyek) | [@uncomfyhalomacro](https://github.com/uncomfyhalomacro)
 openSUSE | [Factory](https://build.opensuse.org/package/show/openSUSE:Factory/sioyek) | [@uncomfyhalomacro](https://github.com/uncomfyhalomacro)
-Ubuntu | [sioyek](https://packages.ubuntu.com/sioyek) | [@viccie30](https://github.com/viccie30)
+Ubuntu | [sioyek](https://packages.ubuntu.org/sioyek) | [@viccie30](https://github.com/viccie30)
 Guix | [sioyek](https://hpc.guix.info/package/sioyek) | [@guix-community](https://codeberg.org/org/guix/members)
 
 
@@ -152,6 +196,16 @@ build_windows.bat
 ```
 
 ### Mac
+
+#### One-Click Build & Install (`install_mac.sh`)
+On macOS (Apple Silicon / Intel), use `install_mac.sh` to build, bundle Qt frameworks, preserve existing user configs (`prefs_user.config` / `keys_user.config`), install to `/Applications/sioyek.app`, and launch:
+```zsh
+./install_mac.sh              # incremental build, install to /Applications, and launch
+./install_mac.sh --no-install # build only (output in build/sioyek.app)
+./install_mac.sh --clean      # full rebuild including mupdf
+```
+
+#### Manual Build (`build_mac.sh`)
 1. Install Xcode.
 2. Clone the repository and build: (The code below is in Zsh, which is the default shell on macOS.)
 ```zsh
