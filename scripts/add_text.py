@@ -82,6 +82,11 @@ if __name__ == '__main__':
                     deleted_count += 1
             if deleted_count > 0:
                 document.save_changes()
+                try:
+                    from .preserve_pdf_annotations import sync_snapshot
+                    sync_snapshot(FILE_PATH, allow_empty=True)
+                except Exception:
+                    pass
                 sioyek.reload()
                 sioyek.set_status_string(f"Deleted {deleted_count} text annotation(s)")
             else:
@@ -103,6 +108,11 @@ if __name__ == '__main__':
             params['fontname'] = 'china-s'
 
         document.embed_text_in_pdf(added_text, selected_page, selected_rect, params)
+        try:
+            from .preserve_pdf_annotations import sync_snapshot
+            sync_snapshot(FILE_PATH, allow_empty=True)
+        except Exception:
+            pass
         sioyek.reload()
         import os
         log_path = os.path.expanduser("~/.config/sioyek/add_text.log")

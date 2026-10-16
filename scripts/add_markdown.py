@@ -942,6 +942,13 @@ def main():
             except Exception:
                 pass
 
+        def update_annot_snapshot():
+            try:
+                from .preserve_pdf_annotations import sync_snapshot
+                sync_snapshot(FILE_PATH, allow_empty=True)
+            except Exception:
+                pass
+
         if action == "cancel":
             doc.close()
             app.quit()
@@ -952,10 +959,13 @@ def main():
                 content = existing_annot.info.get('content', '')
                 page.delete_annot(existing_annot)
                 doc.saveIncr()
+                doc.close()
+                update_annot_snapshot()
                 safe_notify(f"Deleted note: {content[:20]}")
                 with open(log_path, "a", encoding="utf-8") as f:
                     f.write(f"Success: deleted Markdown note on page {selected_page}: '{content}'\n")
-            doc.close()
+            else:
+                doc.close()
             app.quit()
             sys.exit(0)
 
@@ -965,8 +975,11 @@ def main():
                 if existing_annot is not None:
                     page.delete_annot(existing_annot)
                     doc.saveIncr()
+                    doc.close()
+                    update_annot_snapshot()
                     safe_notify("Markdown note deleted")
-                doc.close()
+                else:
+                    doc.close()
                 app.quit()
                 sys.exit(0)
 
@@ -990,13 +1003,14 @@ def main():
             annot.update()
 
             doc.saveIncr()
+            doc.close()
+            update_annot_snapshot()
 
             msg = f"Updated Markdown {mode}" if is_edit_mode else f"Added Markdown {mode}"
             safe_notify(msg)
             with open(log_path, "a", encoding="utf-8") as f:
                 f.write(f"Success: {msg} on page {selected_page} rect {final_rect}\n")
 
-        doc.close()
         app.quit()
         sys.exit(0)
 

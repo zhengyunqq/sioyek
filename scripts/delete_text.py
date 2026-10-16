@@ -139,6 +139,13 @@ def main():
 
         if deleted_count > 0:
             doc.saveIncr()
+            doc.close()
+            doc = None
+            try:
+                from .preserve_pdf_annotations import sync_snapshot
+                sync_snapshot(FILE_PATH, allow_empty=True)
+            except Exception:
+                pass
             msg = f"Deleted {deleted_count} annotation(s)"
             if deleted_contents and deleted_contents[0]:
                 msg += f": {deleted_contents[0][:20]}"
@@ -157,7 +164,8 @@ def main():
             traceback.print_exc(file=f)
         raise
     finally:
-        doc.close()
+        if doc is not None:
+            doc.close()
 
 if __name__ == '__main__':
     main()

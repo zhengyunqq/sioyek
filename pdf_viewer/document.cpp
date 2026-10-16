@@ -75,12 +75,130 @@ void Document::fill_highlight_rects(fz_context* ctx, fz_document* doc_) {
 	// individual characters in the highlighted area (we merge the rects of characters in a single line
 	// which makes the result look nicer)
 
+	auto extract_alnum_lower = [](const std::wstring& s) {
+		std::wstring res;
+		res.reserve(s.size());
+		for (wchar_t c : s) {
+			if (c == 0x25B8 || c == 0x25C2 || c == 0x25B6 || c == 0x25C0) continue;
+			if (iswalnum(c)) {
+				res.push_back(towlower(c));
+			}
+		}
+		return res;
+	};
+
+	int total_pages = num_pages();
+
 	for (size_t i = 0; i < highlights.size(); i++) {
 		const Highlight highlight = highlights[i];
 		std::vector<fz_rect> highlight_rects;
 		std::vector<fz_rect> merged_rects;
 		std::wstring highlight_text;
 		get_text_selection(ctx, highlight.selection_begin, highlight.selection_end, true, highlight_rects, highlight_text, doc_);
+
+		std::wstring target_alnum = extract_alnum_lower(highlight.description);
+		std::wstring actual_alnum = extract_alnum_lower(highlight_text);
+
+		bool matches = (target_alnum.size() < 3) || (actual_alnum == target_alnum);
+		if (!matches && target_alnum.size() >= 6 && actual_alnum.size() >= 6) {
+			if (actual_alnum.find(target_alnum) != std::wstring::npos ||
+				target_alnum.find(actual_alnum) != std::wstring::npos) {
+				matches = true;
+			}
+		}
+
+		if (!matches && total_pages > 0) {
+			DocumentPos orig_pos = absolute_to_page_pos(highlight.selection_begin);
+			int orig_page = orig_pos.page;
+			std::vector<int> cand_pages;
+			for (int dp : { 0, -1, 1, -2, 2 }) {
+				int p = orig_page + dp;
+				if (p >= 0 && p < total_pages) {
+					if (std::find(cand_pages.begin(), cand_pages.end(), p) == cand_pages.end()) {
+						cand_pages.push_back(p);
+					}
+				}
+			}
+
+			float best_score = 1e9f;
+			int best_page = -1;
+			size_t best_c_start = 0;
+			size_t best_c_end = 0;
+
+			for (int p : cand_pages) {
+				fz_stext_page* stext_page = get_stext_with_page_number(ctx, p, doc_);
+				if (!stext_page) continue;
+				std::vector<fz_stext_char*> flat_chars;
+				get_flat_chars_from_stext_page(stext_page, flat_chars);
+
+				std::wstring page_alnum;
+				std::vector<size_t> alnum_idx;
+				page_alnum.reserve(flat_chars.size());
+				alnum_idx.reserve(flat_chars.size());
+
+				for (size_t k = 0; k < flat_chars.size(); k++) {
+					wchar_t c = static_cast<wchar_t>(flat_chars[k]->c);
+					if (c == 0x25B8 || c == 0x25C2 || c == 0x25B6 || c == 0x25C0) continue;
+					if (iswalnum(c)) {
+						page_alnum.push_back(towlower(c));
+						alnum_idx.push_back(k);
+					}
+				}
+
+				size_t search_from = 0;
+				while (search_from <= page_alnum.size()) {
+					size_t found_pos = page_alnum.find(target_alnum, search_from);
+					if (found_pos == std::wstring::npos) break;
+
+					size_t c_start = alnum_idx[found_pos];
+					size_t c_end = alnum_idx[found_pos + target_alnum.size() - 1];
+					fz_rect r_start = fz_rect_from_quad(flat_chars[c_start]->quad);
+					float cx = (r_start.x0 + r_start.x1) * 0.5f;
+					float cy = (r_start.y0 + r_start.y1) * 0.5f;
+					float score = std::fabs(cx - orig_pos.x) * 3.0f + std::fabs(cy - orig_pos.y) + std::abs(p - orig_page) * 800.0f;
+
+					if (score < best_score) {
+						best_score = score;
+						best_page = p;
+						best_c_start = c_start;
+						best_c_end = c_end;
+					}
+					search_from = found_pos + 1;
+				}
+			}
+
+			if (best_page != -1) {
+				fz_stext_page* stext_page = get_stext_with_page_number(ctx, best_page, doc_);
+				if (stext_page) {
+					std::vector<fz_stext_char*> flat_chars;
+					get_flat_chars_from_stext_page(stext_page, flat_chars);
+					if (best_c_end < flat_chars.size()) {
+						highlight_rects.clear();
+						for (size_t k = best_c_start; k <= best_c_end; k++) {
+							int ch_code = flat_chars[k]->c;
+							if (ch_code == 0x25B8 || ch_code == 0x25C2 || ch_code == 0x25B6 || ch_code == 0x25C0) continue;
+							fz_rect char_page_rect = fz_rect_from_quad(flat_chars[k]->quad);
+							highlight_rects.push_back(document_to_absolute_rect(best_page, char_page_rect, true));
+						}
+						fz_rect rb = fz_rect_from_quad(flat_chars[best_c_start]->quad);
+						fz_rect re = fz_rect_from_quad(flat_chars[best_c_end]->quad);
+						AbsoluteDocumentPos new_begin = document_to_absolute_pos({ best_page, (rb.x0 + rb.x1) * 0.5f, (rb.y0 + rb.y1) * 0.5f }, true);
+						AbsoluteDocumentPos new_end = document_to_absolute_pos({ best_page, (re.x0 + re.x1) * 0.5f, (re.y0 + re.y1) * 0.5f }, true);
+
+						if (i < highlights.size()) {
+							highlights[i].selection_begin = new_begin;
+							highlights[i].selection_end = new_end;
+							std::optional<std::string> cs = get_checksum_fast();
+							if (cs) {
+								db_manager->delete_highlight(cs.value(), highlight.selection_begin.x, highlight.selection_begin.y, highlight.selection_end.x, highlight.selection_end.y);
+								db_manager->insert_highlight(cs.value(), highlight.description, new_begin.x, new_begin.y, new_end.x, new_end.y, highlight.type);
+							}
+						}
+					}
+				}
+			}
+		}
+
 		merge_selected_character_rects(highlight_rects, merged_rects);
 
 		if (i < highlights.size()) {
@@ -570,6 +688,11 @@ Document::~Document() {
 		}
 	}
 }
+static QString get_pdf_annot_snapshot_path(const std::wstring& file_name) {
+	QFileInfo fi(QString::fromStdWString(file_name));
+	return fi.absolutePath() + "/.sioyek_bak/" + fi.completeBaseName() + ".pdf_annots.json";
+}
+
 void Document::reload(std::string password) {
 	fz_drop_document(context, doc);
 	cached_num_pages = {};
@@ -600,10 +723,33 @@ void Document::reload(std::string password) {
 
 	doc = nullptr;
 
+	QFileInfo fi(QString::fromStdWString(file_name));
+	QString snap_path = get_pdf_annot_snapshot_path(file_name);
+	QStringList args;
+	args << "-m" << "sioyek.preserve_pdf_annotations" << fi.absoluteFilePath();
+	if (QFile::exists(snap_path)) {
+		run_command(L"python", args, true);
+	}
+	else {
+		run_command(L"python", args, false);
+	}
+
 	open(invalid_flag_pointer, false, password);
 }
 
 bool Document::open(bool* invalid_flag, bool force_load_dimensions, std::string password, bool temp) {
+	if ((doc == nullptr) && (!temp)) {
+		QFileInfo fi(QString::fromStdWString(file_name));
+		QString snap_path = get_pdf_annot_snapshot_path(file_name);
+		QStringList args;
+		args << "-m" << "sioyek.preserve_pdf_annotations" << fi.absoluteFilePath();
+		if (QFile::exists(snap_path)) {
+			run_command(L"python", args, true);
+		}
+		else {
+			run_command(L"python", args, false);
+		}
+	}
 	last_update_time = QDateTime::currentDateTime();
 	if (doc == nullptr) {
 		fz_try(context) {
