@@ -209,6 +209,111 @@ def compute_synctex_anchor(pdf_path, page0, rect):
     return None
 
 
+def extract_freetext_style(doc, annot, colors):
+    """
+    Extracts (fontsize, text_color, fill_color) for a FreeText annotation.
+    Per PDF 1.7 spec (and macOS Preview / Adobe Acrobat / PyMuPDF), FreeText stores
+    its box background fill color in `/C` (`colors["stroke"]`) or `/IC` (`colors["fill"]`),
+    and its font size + text color inside the `/DA` default appearance string.
+    """
+    import re
+    fontsize = 11.0
+    text_color = [1.0, 0.0, 0.0]
+    fill_color = list(colors.get("stroke") or colors.get("fill") or []) or None
+
+    try:
+        da_type, da_val = doc.xref_get_key(annot.xref, "DA")
+        if da_type in ("string", "name") and da_val:
+            da_val = da_val.replace("#20", " ")
+            m_tf = re.search(r"([0-9]+(?:\.[0-9]+)?)\s+Tf", da_val)
+            if m_tf:
+                fs = float(m_tf.group(1))
+                if 4.0 <= fs <= 144.0:
+                    fontsize = fs
+            m_rgb = re.search(r"([0-9]*\.?[0-9]+)\s+([0-9]*\.?[0-9]+)\s+([0-9]*\.?[0-9]+)\s+(?:rg|RG)", da_val)
+            if m_rgb:
+                text_color = [round(float(m_rgb.group(1)), 4), round(float(m_rgb.group(2)), 4), round(float(m_rgb.group(3)), 4)]
+            else:
+                m_g = re.search(r"(?:^|\s)([0-9]*\.?[0-9]+)\s+(?:g|G)(?:\s|$)", da_val)
+                if m_g:
+                    gv = round(float(m_g.group(1)), 4)
+                    text_color = [gv, gv, gv]
+    except Exception:
+        pass
+
+    return {
+        "fontsize": fontsize,
+        "text_color": text_color,
+        "fill_color": fill_color,
+    }
+
+
+def extract_markup_words(page, verts):
+    """Extracts the sequence of words covered by a Highlight/Underline/StrikeOut/Squiggly quad list."""
+    if not verts or len(verts) < 4:
+        return []
+    try:
+        pts = [tuple(v) for v in verts if isinstance(v, (list, tuple)) and len(v) == 2]
+        if len(pts) < 4:
+            return []
+        quad_rects = [fitz.Quad(pts[i : i + 4]).rect for i in range(0, len(pts) - 3, 4)]
+        words = page.get_text("words")
+        matched = []
+        for w in words:
+            wrect = fitz.Rect(w[:4])
+            wcenter = fitz.Point((wrect.x0 + wrect.x1) * 0.5, (wrect.y0 + wrect.y1) * 0.5)
+            for qr in quad_rects:
+                if qr.contains(wcenter) or (qr & wrect).get_area() > 0.4 * max(1e-3, wrect.get_area()):
+                    matched.append(w[4])
+                    break
+        return matched
+    except Exception:
+        return []
+
+
+def find_markup_quads_by_words(page, markup_words, expected_y0, expected_x0):
+    """
+    Locates `markup_words` on `page` closest to `(expected_x0, expected_y0)` and returns
+    a list of `fitz.Quad`s (one per line) so highlights/underlines re-wrap cleanly across line breaks.
+    """
+    if not markup_words:
+        return None
+    try:
+        words = page.get_text("words")
+        k = len(markup_words)
+        if k == 0 or k > len(words):
+            return None
+        best_slice = None
+        best_dist = float("inf")
+        for i in range(len(words) - k + 1):
+            if [words[i + j][4] for j in range(k)] == markup_words:
+                wx0, wy0 = words[i][0], words[i][1]
+                dist = abs(wy0 - expected_y0) * 2.0 + abs(wx0 - expected_x0) * 0.2
+                if dist < best_dist:
+                    best_dist = dist
+                    best_slice = words[i : i + k]
+        if not best_slice:
+            return None
+        line_rects = []
+        cur_key = None
+        cur_rect = None
+        for w in best_slice:
+            key = (w[5], w[6])
+            r = fitz.Rect(w[:4])
+            if key != cur_key:
+                if cur_rect is not None:
+                    line_rects.append(cur_rect)
+                cur_key = key
+                cur_rect = r
+            else:
+                cur_rect |= r
+        if cur_rect is not None:
+            line_rects.append(cur_rect)
+        return [r.quad for r in line_rects]
+    except Exception:
+        return None
+
+
 def extract_annotations_from_doc(doc, pdf_path, existing_entries=None):
     """Extracts all user annotations from an open fitz.Document."""
     # Map (page, round_rect, subtype, content) -> existing synctex_anchor so we don't re-query unchanged annots
@@ -244,7 +349,19 @@ def extract_annotations_from_doc(doc, pdf_path, existing_entries=None):
                 },
                 "opacity": opacity,
                 "border_width": border.get("width", 0),
+                "border": {
+                    "width": border.get("width"),
+                    "dashes": list(border["dashes"]) if border.get("dashes") else None,
+                    "style": border.get("style"),
+                },
+                "is_open": bool(getattr(annot, "is_open", False)),
             }
+
+            if subtype in ("Line", "PolyLine") and getattr(annot, "line_ends", None):
+                entry["line_ends"] = list(annot.line_ends)
+
+            if subtype == "FreeText":
+                entry["freetext_style"] = extract_freetext_style(doc, annot, colors)
 
             if subtype == "Stamp":
                 try:
@@ -256,7 +373,16 @@ def extract_annotations_from_doc(doc, pdf_path, existing_entries=None):
             if subtype in ("Highlight", "Underline", "StrikeOut", "Squiggly", "Ink", "Line", "PolyLine", "Polygon"):
                 verts = annot.vertices
                 if verts:
-                    entry["vertices"] = [list(v) if isinstance(v, (tuple, list)) else v for v in verts]
+                    entry["vertices"] = [
+                        [[round(p[0], 2), round(p[1], 2)] for p in v]
+                        if (isinstance(v, (tuple, list)) and len(v) > 0 and isinstance(v[0], (tuple, list)))
+                        else ([round(v[0], 2), round(v[1], 2)] if isinstance(v, (tuple, list)) and len(v) == 2 else v)
+                        for v in verts
+                    ]
+                    if subtype in ("Highlight", "Underline", "StrikeOut", "Squiggly"):
+                        mw = extract_markup_words(page, verts)
+                        if mw:
+                            entry["markup_words"] = mw
 
             cache_key = (page_idx, tuple(round(v, 1) for v in r), subtype, info.get("content", ""))
             anchor = anchor_cache.get(cache_key)
@@ -376,7 +502,6 @@ def embed_entry_into_doc(doc, pdf_path, entry, synctex_bin):
     target_page, target_rect = resolve_target_page_and_rect(doc, pdf_path, entry, synctex_bin)
     page = doc[target_page]
 
-    orig_page = entry.get("page", target_page)
     orig_rect = entry.get("rect", [target_rect.x0, target_rect.y0, target_rect.x1, target_rect.y1])
     dy = target_rect.y0 - orig_rect[1]
     dx = target_rect.x0 - orig_rect[0]
@@ -416,24 +541,45 @@ def embed_entry_into_doc(doc, pdf_path, entry, synctex_bin):
 
     elif subtype == "FreeText":
         content = info.get("content", "")
-        stroke_c = tuple(colors["stroke"]) if colors.get("stroke") else (1.0, 0.0, 0.0)
-        fill_c = tuple(colors["fill"]) if colors.get("fill") else None
+        ft_style = entry.get("freetext_style") or {}
+        text_c = tuple(ft_style.get("text_color") or colors.get("stroke") or [1.0, 0.0, 0.0])
+        fill_c = tuple(ft_style["fill_color"]) if ft_style.get("fill_color") else (tuple(colors["fill"]) if colors.get("fill") else None)
+        fontsize = float(ft_style.get("fontsize", 11.0))
         fontname = "china-s" if any(ord(ch) > 127 for ch in content) else "helv"
         annot = page.add_freetext_annot(
             target_rect,
             content,
-            fontsize=11.0,
+            fontsize=fontsize,
             fontname=fontname,
-            text_color=stroke_c,
+            text_color=text_c,
             fill_color=fill_c,
         )
 
     elif subtype == "Text":
-        annot = page.add_text_annot(target_rect.tl, info.get("content", ""))
+        icon_name = info.get("name") or "Note"
+        try:
+            annot = page.add_text_annot(target_rect.tl, info.get("content", ""), icon=icon_name)
+        except Exception:
+            annot = page.add_text_annot(target_rect.tl, info.get("content", ""))
 
     elif subtype in ("Highlight", "Underline", "StrikeOut", "Squiggly"):
-        verts = shift_pts(entry.get("vertices"))
-        quads = fitz. points_to_quads(verts) if (verts and hasattr(fitz, "points_to_quads")) else target_rect
+        quads = None
+        markup_words = entry.get("markup_words")
+        if markup_words:
+            # First search on target_page, then adjacent pages if a paragraph crossed a page break
+            for cand_p in [target_page, target_page - 1, target_page + 1]:
+                if 0 <= cand_p < len(doc):
+                    q_match = find_markup_quads_by_words(doc[cand_p], markup_words, target_rect.y0, target_rect.x0)
+                    if q_match:
+                        page = doc[cand_p]
+                        quads = q_match
+                        break
+        if quads is None:
+            verts = shift_pts(entry.get("vertices"))
+            if verts and len(verts) >= 4 and isinstance(verts[0], tuple):
+                quads = [fitz.Quad(verts[i : i + 4]) for i in range(0, len(verts) - 3, 4)]
+            else:
+                quads = target_rect
         try:
             if subtype == "Highlight":
                 annot = page.add_highlight_annot(quads)
@@ -460,20 +606,59 @@ def embed_entry_into_doc(doc, pdf_path, entry, synctex_bin):
         if verts:
             annot = page.add_ink_annot(verts)
 
+    elif subtype == "Line":
+        verts = shift_pts(entry.get("vertices"))
+        if verts and len(verts) >= 2 and isinstance(verts[0], tuple):
+            annot = page.add_line_annot(verts[0], verts[1])
+
+    elif subtype == "PolyLine":
+        verts = shift_pts(entry.get("vertices"))
+        if verts and isinstance(verts[0], tuple):
+            annot = page.add_polyline_annot(verts)
+
+    elif subtype == "Polygon":
+        verts = shift_pts(entry.get("vertices"))
+        if verts and isinstance(verts[0], tuple):
+            annot = page.add_polygon_annot(verts)
+
     if annot is not None:
         annot.set_info({
             "content": info.get("content", ""),
             "title": info.get("title", ""),
             "subject": info.get("subject", ""),
         })
-        if subtype != "Stamp" and subtype != "FreeText":
+        if subtype not in ("Stamp", "FreeText"):
             stroke_c = tuple(colors["stroke"]) if colors.get("stroke") else None
             fill_c = tuple(colors["fill"]) if colors.get("fill") else None
             if stroke_c or fill_c:
                 try:
-                    annot.set_colors(stroke=stroke_c, fill=fill_c)
+                    if subtype in ("Highlight", "Underline", "StrikeOut", "Squiggly", "Text", "Ink", "Caret"):
+                        if stroke_c:
+                            annot.set_colors(stroke=stroke_c)
+                    else:
+                        annot.set_colors(stroke=stroke_c, fill=fill_c)
                 except Exception:
                     pass
+        border_info = entry.get("border")
+        if border_info and subtype in ("Square", "Circle", "Line", "PolyLine", "Polygon", "Ink"):
+            try:
+                bw = border_info.get("width")
+                bd = tuple(border_info["dashes"]) if border_info.get("dashes") else None
+                if bw is not None or bd is not None:
+                    annot.set_border(width=bw if bw is not None else -1, dashes=bd)
+            except Exception:
+                pass
+        line_ends = entry.get("line_ends")
+        if line_ends and len(line_ends) == 2 and subtype in ("Line", "PolyLine"):
+            try:
+                annot.set_line_ends(line_ends[0], line_ends[1])
+            except Exception:
+                pass
+        if entry.get("is_open") and subtype == "Text":
+            try:
+                annot.set_open(True)
+            except Exception:
+                pass
         if opacity is not None and 0.0 <= opacity < 1.0:
             try:
                 annot.set_opacity(opacity)
@@ -484,6 +669,40 @@ def embed_entry_into_doc(doc, pdf_path, entry, synctex_bin):
     return False
 
 
+def _collect_current_annot_signatures(doc):
+    """
+    Collects lightweight signature tuples for all user annotations in `doc`.
+    IMPORTANT: Accesses `annot` properties while `page = doc[page_idx]` is alive in local scope,
+    because PyMuPDF `Annot` objects hold a C pointer owned by their parent `Page`.
+    """
+    sigs = []
+    for page_idx in range(len(doc)):
+        page = doc[page_idx]
+        for a in page.annots():
+            subtype = a.type[1]
+            if subtype not in PRESERVED_SUBTYPES:
+                continue
+            r = [round(a.rect.x0, 1), round(a.rect.y0, 1), round(a.rect.x1, 1), round(a.rect.y1, 1)]
+            info = a.info or {}
+            colors = a.colors or {}
+            sc = [round(x, 2) for x in (colors.get("stroke") or [])]
+            fc = [round(x, 2) for x in (colors.get("fill") or [])]
+            sigs.append((page_idx, subtype, r, info.get("content", ""), sc, fc))
+    return sigs
+
+
+def _saved_signature_list(saved_entries):
+    sigs = []
+    for ent in saved_entries:
+        r = [round(x, 1) for x in ent.get("rect", [0, 0, 0, 0])]
+        info = ent.get("info") or {}
+        colors = ent.get("colors") or {}
+        sc = [round(x, 2) for x in (colors.get("stroke") or [])]
+        fc = [round(x, 2) for x in (colors.get("fill") or [])]
+        sigs.append((ent.get("page", 0), ent.get("subtype", ""), r, info.get("content", ""), sc, fc))
+    return sigs
+
+
 def restore_or_sync_pdf_annotations(pdf_path):
     """
     Main entry point called when Sioyek opens or reloads `pdf_path`:
@@ -491,8 +710,8 @@ def restore_or_sync_pdf_annotations(pdf_path):
        `.sioyek_bak/<stem>.pdf_annots.json` has saved annotations, restores all saved
        annotations into `pdf_path` (adjusting positions via SyncTeX if text shifted)
        and updates the snapshot's SyncTeX anchors.
-    2. Otherwise, if `pdf_path` has user annotations on disk (e.g. added in an external
-       PDF viewer or existing before snapshot was created), snapshots them to
+    2. Otherwise, if `pdf_path` has user annotations on disk (e.g. added or edited in
+       an external PDF viewer such as macOS Preview or Adobe Acrobat), snapshots them to
        `.sioyek_bak/<stem>.pdf_annots.json`.
     Returns the number of annotations restored (or 0 if none needed restoring).
     """
@@ -506,17 +725,12 @@ def restore_or_sync_pdf_annotations(pdf_path):
         return 0
 
     try:
-        current_annots = []
-        for page_idx in range(len(doc)):
-            for annot in doc[page_idx].annots():
-                if annot.type[1] in PRESERVED_SUBTYPES:
-                    current_annots.append((page_idx, annot))
-
+        current_sigs = _collect_current_annot_signatures(doc)
         snap = load_snapshot(pdf_path)
         saved_entries = snap.get("annotations", []) if snap else []
 
         # Case 1: Freshly recompiled PDF (0 annotations on disk, saved annotations in snapshot)
-        if len(current_annots) == 0 and len(saved_entries) > 0:
+        if len(current_sigs) == 0 and len(saved_entries) > 0:
             synctex_bin = find_synctex_binary() if has_synctex_data(pdf_path) else None
             restored = 0
             for entry in saved_entries:
@@ -533,8 +747,8 @@ def restore_or_sync_pdf_annotations(pdf_path):
                 log(f"Restored {restored}/{len(saved_entries)} annotation(s) into recompiled {os.path.basename(pdf_path)}")
             return restored
 
-        # Case 2: PDF on disk has annotations (e.g. external PDF annotations or existing ones)
-        if len(current_annots) > 0 and len(current_annots) != len(saved_entries):
+        # Case 2: PDF on disk has annotations (e.g. external PDF annotations added/edited/removed)
+        if len(current_sigs) > 0 and current_sigs != _saved_signature_list(saved_entries):
             entries = extract_annotations_from_doc(doc, pdf_path, existing_entries=saved_entries)
             save_snapshot_data(pdf_path, entries)
             log(f"Synced {len(entries)} annotation(s) from {os.path.basename(pdf_path)} into snapshot")
@@ -552,3 +766,4 @@ if __name__ == "__main__":
         sync_snapshot(target_pdf, allow_empty=True)
     else:
         restore_or_sync_pdf_annotations(target_pdf)
+
