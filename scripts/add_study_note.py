@@ -45,10 +45,30 @@ DEFINITION_LINES = [
     r"\makeatletter",
     r"\@ifpackageloaded{xcolor}{}{\@ifpackageloaded{color}{}{\usepackage{xcolor}}}",
     r"\@ifpackageloaded{marginnote}{}{\usepackage{marginnote}}",
-    r"\makeatother",
     r"\newif\ifstudynotes \studynotestrue",
     r"% \studynotesfalse   % uncomment to hide ALL study notes",
-    r"\providecommand{\studynote}[1]{\ifstudynotes\marginnote{\raggedright\footnotesize\color{blue}\textbf{Note:} #1}\fi}",
+    r"\providecommand{\sioyek@studynotebody}[1]{%",
+    r"  \begingroup",
+    r"  \footnotesize\color{blue}%",
+    r"  \setlength{\parindent}{0pt}%",
+    r"  \setlength{\parskip}{2pt}%",
+    r"  \raggedright\sloppy\emergencystretch=3em\relax",
+    r"  \let\sioyek@orig@us\_%",
+    r"  \def\_{\hspace{0pt}\sioyek@orig@us\penalty0\hspace{0pt}}%",
+    r"  \def\slash{/\penalty0\hspace{0pt}}%",
+    r"  \textbf{Note:}\hspace{0.35em}\hspace{0pt}#1\par",
+    r"  \endgroup",
+    r"}",
+    r"\providecommand{\studynote}[1]{%",
+    r"  \ifstudynotes",
+    r"    \ifinner",
+    r"      \marginnote{\sioyek@studynotebody{#1}}%",
+    r"    \else",
+    r"      \marginpar{\sioyek@studynotebody{#1}}%",
+    r"    \fi",
+    r"  \fi",
+    r"}",
+    r"\makeatother",
     MARKER_END,
 ]
 
@@ -539,11 +559,13 @@ def validate_note(text):
 
 
 def note_to_latex(text):
-    """Text is written verbatim (no escaping); only newlines become \\\\ so the note stays on one source line."""
+    """Converts multiline note text to single-line LaTeX for \\studynote{...},
+    auto-escaping raw '_' outside math/braces and allowing line breaks after '/'."""
     text = text.strip()
     text = re.sub(r"[ \t]*\r?\n[\s]*", "\n", text)  # collapse blank lines / indentation
     out = []
     math = None
+    brace_depth = 0
     i = 0
     n = len(text)
     while i < n:
@@ -563,8 +585,18 @@ def note_to_latex(text):
                 continue
             math = None if math == "$" else "$"
             out.append(c)
+        elif c == "{":
+            brace_depth += 1
+            out.append(c)
+        elif c == "}":
+            brace_depth = max(0, brace_depth - 1)
+            out.append(c)
         elif c == "\n":
             out.append(" " if math else r"\\ ")
+        elif c == "_" and math is None and brace_depth == 0:
+            out.append(r"\_")
+        elif c == "/" and math is None and brace_depth == 0 and (i + 1 < n and not text[i + 1].isspace()):
+            out.append(r"\slash ")
         else:
             out.append(c)
         i += 1
@@ -572,8 +604,10 @@ def note_to_latex(text):
 
 
 def latex_to_note(content):
-    """Inverse of the newline conversion for pre-filling the editor."""
-    return re.sub(r"\\\\ ?", "\n", content)
+    """Inverse of the newline / slash conversion for pre-filling the editor."""
+    s = re.sub(r"\\\\ ?", "\n", content)
+    s = s.replace(r"\slash ", "/")
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +666,7 @@ def inject_definition(tf):
                     break
             if end_idx != -1:
                 block_str = "".join(tf.lines[i:end_idx + 1])
-                if r"\marginnote" in block_str and r"\studynote" in block_str:
+                if r"\sioyek@studynotebody" in block_str and r"\studynote" in block_str:
                     return False
                 nl = tf.newline
                 block = [l + nl for l in DEFINITION_LINES]
