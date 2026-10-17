@@ -798,7 +798,9 @@ class CopyLatexSourceCommand : public Command {
 		if (widget->copy_latex_source_if_available()) {
 			return;
 		}
-		copy_to_clipboard(widget->selected_text);
+		if (!widget->selected_text.empty()) {
+			copy_to_clipboard(widget->selected_text);
+		}
 	}
 
 	std::string get_name() {
@@ -2623,15 +2625,6 @@ InputParseTreeNode* parse_lines(
 			}
 			if (!existing_node) {
 				if ((tokens[i] != L"sym") && (tokens[i] != L"txt")) {
-					if (parent_node->is_final) {
-                        std::wcout
-                            << L"Warning: key defined in " << command_file_names[j]
-                            << L":" << command_line_numbers[j]
-                            << L" for " << utf8_decode(command_names[j][0])
-                            << L" is unreachable, shadowed by final key sequence defined in "
-                            << parent_node->defining_file_path
-                            << L":" << parent_node->defining_file_line << L"\n";
-					}
 					auto new_node = new InputParseTreeNode(node);
 					new_node->defining_file_line = command_line_numbers[j];
 					new_node->defining_file_path = command_file_names[j];
@@ -2677,10 +2670,9 @@ InputParseTreeNode* parse_lines(
 				}
 			}
 			else {
-				if (parent_node->is_final && (parent_node->name.size() > 0)) {
-					std::wcout << L"Warning: unmapping " << utf8_decode(parent_node->name[0]) << L" because of " << utf8_decode(command_names[j][0]) << L" which uses " << line << L"\n";
+				if (parent_node->name.empty()) {
+					parent_node->is_final = false;
 				}
-				parent_node->is_final = false;
 			}
 
 		}
@@ -2825,6 +2817,22 @@ std::vector<std::unique_ptr<Command>> InputHandler::handle_key(QKeyEvent* key_ev
 
 	}
 
+	// If current_node is an already-executed final prefix node (e.g. <C-c> which also has <C-c>t)
+	// and the new key does not match any of its continuation children, transparently reset to root
+	// so the new key is processed as a normal top-level command.
+	if (current_node != root && current_node->is_final) {
+		bool matches_continuation = false;
+		for (InputParseTreeNode* child : current_node->children) {
+			if (child->matches(key, shift_pressed, control_pressed, alt_pressed)) {
+				matches_continuation = true;
+				break;
+			}
+		}
+		if (!matches_continuation) {
+			current_node = root;
+		}
+	}
+
 	if (current_node == root && is_digit(key)) {
 		if (!(key == '0' && (number_stack.size() == 0)) && (!control_pressed) && (!shift_pressed) && (!alt_pressed)) {
 			number_stack.push_back('0' + key - Qt::Key::Key_0);
@@ -2836,7 +2844,7 @@ std::vector<std::unique_ptr<Command>> InputHandler::handle_key(QKeyEvent* key_ev
 		//if (child->command == key && child->shift_modifier == shift_pressed && child->control_modifier == control_pressed){
 		if (child->matches(key, shift_pressed, control_pressed, alt_pressed)){
 			if (child->is_final == true) {
-				current_node = root;
+				current_node = child->children.empty() ? root : child;
 				//cout << child->name << endl;
 				*num_repeats = 0;
 				if (number_stack.size() > 0) {
@@ -2930,13 +2938,10 @@ void InputHandler::add_command_key_mappings(InputParseTreeNode* thisroot,
 			}
 		}
 	}
-	else{
-		for (size_t i = 0; i < thisroot->children.size(); i++) {
-			prefix.push_back(thisroot->children[i]);
-			add_command_key_mappings(thisroot->children[i], map, prefix);
-			prefix.pop_back();
-		}
-
+	for (size_t i = 0; i < thisroot->children.size(); i++) {
+		prefix.push_back(thisroot->children[i]);
+		add_command_key_mappings(thisroot->children[i], map, prefix);
+		prefix.pop_back();
 	}
 }
 
