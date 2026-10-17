@@ -779,13 +779,68 @@ class OpenDocumentEmbeddedFromCurrentPathCommand : public Command {
 	bool requires_document() { return false; }
 };
 
+namespace {
+QTimer* g_pending_copy_timer = nullptr;
+std::function<void()> g_pending_copy_fn = nullptr;
+
+void flush_pending_copy() {
+	if (g_pending_copy_timer && g_pending_copy_timer->isActive()) {
+		g_pending_copy_timer->stop();
+		if (g_pending_copy_fn) {
+			auto fn = std::move(g_pending_copy_fn);
+			g_pending_copy_fn = nullptr;
+			fn();
+		}
+	}
+}
+
+void cancel_pending_copy() {
+	if (g_pending_copy_timer && g_pending_copy_timer->isActive()) {
+		g_pending_copy_timer->stop();
+	}
+	g_pending_copy_fn = nullptr;
+}
+
+void schedule_pending_copy(MainWidget* widget, std::function<void()> fn) {
+	if (!g_pending_copy_timer) {
+		g_pending_copy_timer = new QTimer(qGuiApp);
+		g_pending_copy_timer->setSingleShot(true);
+		QObject::connect(g_pending_copy_timer, &QTimer::timeout, []() {
+			if (g_pending_copy_fn) {
+				auto f = std::move(g_pending_copy_fn);
+				g_pending_copy_fn = nullptr;
+				f();
+			}
+		});
+		if (qGuiApp) {
+			QObject::connect(qGuiApp, &QGuiApplication::applicationStateChanged, [](Qt::ApplicationState state) {
+				if (state != Qt::ApplicationActive) {
+					flush_pending_copy();
+				}
+			});
+		}
+	}
+	// If already active (e.g. user intentionally pressed Cmd+C+C twice), flush first and run second immediately
+	if (g_pending_copy_timer->isActive()) {
+		flush_pending_copy();
+		fn();
+		return;
+	}
+	g_pending_copy_fn = std::move(fn);
+	g_pending_copy_timer->start(600);
+	(void)widget;
+}
+} // namespace
+
 class CopyCommand : public Command {
 	void perform(MainWidget* widget) {
-		if ((widget->get_selected_rect_absolute().has_value() || widget->selected_text.empty()) &&
-			widget->copy_latex_source_if_available()) {
-			return;
-		}
-		copy_to_clipboard(widget->selected_text);
+		schedule_pending_copy(widget, [widget]() {
+			if ((widget->get_selected_rect_absolute().has_value() || widget->selected_text.empty()) &&
+				widget->copy_latex_source_if_available()) {
+				return;
+			}
+			copy_to_clipboard(widget->selected_text);
+		});
 	}
 
 	std::string get_name() {
@@ -795,6 +850,7 @@ class CopyCommand : public Command {
 
 class CopyLatexSourceCommand : public Command {
 	void perform(MainWidget* widget) {
+		cancel_pending_copy();
 		if (widget->copy_latex_source_if_available()) {
 			return;
 		}
@@ -2829,6 +2885,9 @@ std::vector<std::unique_ptr<Command>> InputHandler::handle_key(QKeyEvent* key_ev
 			}
 		}
 		if (!matches_continuation) {
+			if (!(key == 'c' && control_pressed && !shift_pressed && !alt_pressed)) {
+				flush_pending_copy();
+			}
 			current_node = root;
 		}
 	}
