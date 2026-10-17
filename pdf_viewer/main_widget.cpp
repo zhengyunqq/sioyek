@@ -1422,6 +1422,7 @@ void MainWidget::handle_left_click(WindowPos click_pos, bool down, bool is_shift
             rect_select_begin = abs_doc_pos;
             rect_select_end = {};
             opengl_widget->clear_selected_rectangle();
+            clear_selected_text();
         }
         else {
             if (rect_select_begin.has_value()) {
@@ -1502,7 +1503,7 @@ void MainWidget::handle_left_click(WindowPos click_pos, bool down, bool is_shift
         //last_mouse_down_window_x = x;
         //last_mouse_down_window_y = y;
 
-        main_document_view->selected_character_rects.clear();
+        clear_selected_text();
 
         if (!mouse_drag_mode) {
             is_selecting = true;
@@ -1987,8 +1988,8 @@ void MainWidget::wheelEvent(QWheelEvent* wevent) {
     if (has_pixel_delta) {
         // High-resolution device (macOS trackpad): pixel delta is directly in screen pixels.
         // Positive pixelDelta().y() scrolls content downward (view earlier in document).
-        dy_pixels = -static_cast<float>(pixel_delta.y()) * TOUCHPAD_SENSITIVITY;
-        dx_pixels = -static_cast<float>(pixel_delta.x()) * TOUCHPAD_SENSITIVITY;
+        dy_pixels = -static_cast<float>(pixel_delta.y()) * vertical_move_amount;
+        dx_pixels = -static_cast<float>(pixel_delta.x()) * horizontal_move_amount;
         num_repeats_f = std::max(0.1f, static_cast<float>(std::abs(pixel_delta.y())) / 15.0f);
     }
     else {
@@ -2016,11 +2017,15 @@ void MainWidget::wheelEvent(QWheelEvent* wevent) {
     if ((!is_control_pressed) && (!is_shift_pressed)) {
         if (opengl_widget->is_window_point_in_overview({ normal_x, normal_y })) {
             if (dy_pixels != 0.0f) {
-                float amt = has_pixel_delta ? (dy_pixels * 0.1f) : (dy_pixels / 72.0f);
+                float amt = has_pixel_delta
+                    ? (-static_cast<float>(pixel_delta.y()) / 36.0f)
+                    : (vertical_move_amount != 0.0f ? (dy_pixels / (72.0f * vertical_move_amount)) : (dy_pixels / 72.0f));
                 scroll_overview(amt);
             }
             if (dx_pixels != 0.0f) {
-                float amt = has_pixel_delta ? (dx_pixels * 0.001f * inverse_factor) : (dx_pixels / 72.0f * 0.05f * inverse_factor);
+                float amt = has_pixel_delta
+                    ? (-dx_pixels * 0.0015f * inverse_factor)
+                    : (-dx_pixels / 72.0f * 0.05f * inverse_factor);
                 opengl_widget->pan_overview_horizontal(amt);
             }
             validate_render();
@@ -3499,7 +3504,7 @@ void balance_latex_range(const QStringList& all_lines, int& min_line, int& max_l
 }
 
 QString extract_latex_subphrase(const QString& line, const QString& selected_text) {
-	QString sel = selected_text.trimmed();
+	QString sel = selected_text.simplified();
 	if (sel.isEmpty()) return line;
 
 	int idx = line.indexOf(sel);
@@ -3533,6 +3538,52 @@ QString extract_latex_subphrase(const QString& line, const QString& selected_tex
 		}
 	}
 
+	// Anchor-word span match when selected_text contains inline math ($...$) or macros (\emph{...})
+	QRegularExpression word_re("[A-Za-z0-9]{2,}");
+	QStringList words;
+	auto it = word_re.globalMatch(sel);
+	while (it.hasNext()) {
+		words.append(it.next().captured(0));
+	}
+	if (words.size() >= 2) {
+		const QString& first_w = words.front();
+		const QString& last_w = words.back();
+		int start_idx = line.indexOf(first_w);
+		if (start_idx != -1) {
+			int end_search_from = start_idx + first_w.length();
+			int end_idx = line.indexOf(last_w, end_search_from);
+			int max_span = sel.length() * 2 + 48;
+			if (end_idx != -1 && (end_idx + last_w.length() - start_idx) <= max_span) {
+				int span_start = start_idx;
+				int span_end = end_idx + last_w.length();
+				if (span_start > 0 && line[span_start - 1] == '$') {
+					span_start--;
+				}
+				if (span_end < line.length() && line[span_end] == '$') {
+					span_end++;
+				}
+				// Balance single '$' delimiters inside the extracted span
+				QString sub = line.mid(span_start, span_end - span_start);
+				if (sub.count('$') % 2 != 0) {
+					int prev_dollar = line.lastIndexOf('$', span_start - 1);
+					int next_dollar = line.indexOf('$', span_end);
+					if (prev_dollar != -1 && (span_start - prev_dollar) <= 16) {
+						span_start = prev_dollar;
+					} else if (next_dollar != -1 && (next_dollar - span_end) <= 16) {
+						span_end = next_dollar + 1;
+					}
+					sub = line.mid(span_start, span_end - span_start);
+				}
+				return sub.trimmed();
+			}
+		}
+	}
+
+	// Avoid dumping an entire long paragraph line when a short phrase could not be matched verbatim
+	if (sel.length() < line.trimmed().length() * 0.5) {
+		return sel;
+	}
+
 	return line;
 }
 
@@ -3556,9 +3607,22 @@ bool MainWidget::copy_latex_source_if_available() {
 
 	std::vector<DocumentPos> query_points;
 
-	// Check Source A: selected_character_rects
+	// Check Source A: selected rectangle (highest priority when user explicitly selected a box)
+	int rect_page = -1;
+	fz_rect doc_rect = { 0, 0, 0, 0 };
+	if (get_selected_rect_document(rect_page, doc_rect)) {
+		float mid_x = (doc_rect.x0 + doc_rect.x1) * 0.5f;
+		float mid_y = (doc_rect.y0 + doc_rect.y1) * 0.5f;
+		query_points.push_back({ rect_page, mid_x, doc_rect.y0 });
+		query_points.push_back({ rect_page, mid_x, mid_y });
+		query_points.push_back({ rect_page, mid_x, doc_rect.y1 });
+		query_points.push_back({ rect_page, doc_rect.x0, mid_y });
+		query_points.push_back({ rect_page, doc_rect.x1, mid_y });
+	}
+
+	// Check Source B: selected_character_rects
 	const auto& char_rects = main_document_view->selected_character_rects;
-	if (!char_rects.empty()) {
+	if (query_points.empty() && !char_rects.empty()) {
 		query_points.push_back(doc()->absolute_to_page_pos({
 			(char_rects.front().x0 + char_rects.front().x1) * 0.5f,
 			(char_rects.front().y0 + char_rects.front().y1) * 0.5f
@@ -3576,19 +3640,6 @@ bool MainWidget::copy_latex_source_if_available() {
 			(char_rects.back().x0 + char_rects.back().x1) * 0.5f,
 			(char_rects.back().y0 + char_rects.back().y1) * 0.5f
 		}));
-	}
-
-	// Check Source B: selected rectangle
-	int rect_page = -1;
-	fz_rect doc_rect = { 0, 0, 0, 0 };
-	if (query_points.empty() && get_selected_rect_document(rect_page, doc_rect)) {
-		float mid_x = (doc_rect.x0 + doc_rect.x1) * 0.5f;
-		float mid_y = (doc_rect.y0 + doc_rect.y1) * 0.5f;
-		query_points.push_back({ rect_page, mid_x, doc_rect.y0 });
-		query_points.push_back({ rect_page, mid_x, mid_y });
-		query_points.push_back({ rect_page, mid_x, doc_rect.y1 });
-		query_points.push_back({ rect_page, doc_rect.x0, mid_y });
-		query_points.push_back({ rect_page, doc_rect.x1, mid_y });
 	}
 
 	// Check Source C: selection_begin and selection_end if selected_text is not empty
@@ -3704,7 +3755,13 @@ bool MainWidget::copy_latex_source_if_available() {
 		while (!snippet_lines.isEmpty() && snippet_lines.last().trimmed().isEmpty()) {
 			snippet_lines.removeLast();
 		}
-		result_text = snippet_lines.join("\n");
+		QString joined_lines = snippet_lines.join("\n");
+		if (!selected_text.empty() && (max_line - min_line) <= 2 &&
+			!joined_lines.contains("\\begin{") && !joined_lines.contains("\\[")) {
+			result_text = extract_latex_subphrase(snippet_lines.join(" "), QString::fromStdWString(selected_text));
+		} else {
+			result_text = joined_lines;
+		}
 	}
 
 	if (result_text.trimmed().isEmpty()) {

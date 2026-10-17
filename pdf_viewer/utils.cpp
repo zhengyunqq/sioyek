@@ -895,16 +895,7 @@ void run_command(std::wstring command, QStringList parameters, bool wait){
 
 	if (wait) {
 		process->start(qcommand, qparameters);
-		const int MAX_WAIT_MS = 2500;
-		const int STEP_MS = 20;
-		int elapsed = 0;
-		while (process->state() == QProcess::Running && elapsed < MAX_WAIT_MS) {
-			QCoreApplication::processEvents(QEventLoop::AllEvents, STEP_MS);
-			if (process->waitForFinished(STEP_MS)) {
-				break;
-			}
-			elapsed += STEP_MS;
-		}
+		process->waitForFinished(2500);
 	}
 	else {
 		process->startDetached(qcommand, qparameters);

@@ -781,7 +781,8 @@ class OpenDocumentEmbeddedFromCurrentPathCommand : public Command {
 
 class CopyCommand : public Command {
 	void perform(MainWidget* widget) {
-		if (widget->selected_text.empty() && widget->copy_latex_source_if_available()) {
+		if ((widget->get_selected_rect_absolute().has_value() || widget->selected_text.empty()) &&
+			widget->copy_latex_source_if_available()) {
 			return;
 		}
 		copy_to_clipboard(widget->selected_text);
